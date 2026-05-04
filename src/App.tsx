@@ -2,33 +2,48 @@ import {
   ChangeEvent,
   ClipboardEvent as ReactClipboardEvent,
   FormEvent,
+  KeyboardEvent as ReactKeyboardEvent,
   useEffect,
   useMemo,
   useState,
 } from "react";
 import {
+  ChevronDown,
+  CircleDot,
   ClipboardPaste,
-  Clock3,
   Diff,
   FileImage,
   FileText,
+  Folder,
+  FolderOpen,
   FolderPlus,
   GitBranch,
-  GitCommitHorizontal,
   ImageIcon,
   ImagePlus,
-  Layers3,
+  Moon,
   PanelLeft,
   Plus,
   Save,
   Sparkles,
+  Sun,
   Trash2,
   X,
 } from "lucide-react";
-import { ConfirmModal, type ConfirmDialogState } from "./components/ConfirmModal";
+import {
+  ConfirmModal,
+  type ConfirmDialogState,
+} from "./components/ConfirmModal";
 import { Toast, type ToastState, type ToastVariant } from "./components/Toast";
-import { createId, deleteItem, getAll, nowIso, putItem, seedIfEmpty } from "./lib/db";
+import {
+  createId,
+  deleteItem,
+  getAll,
+  nowIso,
+  putItem,
+  seedIfEmpty,
+} from "./lib/db";
 import { diffLines, type LineDiffRow } from "./lib/diff";
+import { localeKey, messages, readLocale, type Locale } from "./i18n";
 import type {
   DraftImage,
   ImageAsset,
@@ -40,12 +55,28 @@ import type {
 } from "./types";
 
 const selectionKey = "prompt-reinforcer-selection";
-const themeColors = ["#2563eb", "#0f766e", "#ca8a04", "#dc2626", "#7c3aed", "#475569"];
+const appearanceKey = "prompt-reinforcer-appearance";
+const themeColors = [
+  "#EF4444",
+  "#F97316",
+  "#F6C453",
+  "#4ADE80",
+  "#38BDF8",
+  "#5B8DEF",
+  "#A78BFA",
+];
 
 type Selection = {
   projectId: string;
   themeId: string;
   topicId: string;
+};
+
+type AppearanceTheme = "light" | "dark";
+type RenameTarget = {
+  kind: "project" | "theme" | "topic";
+  id: string;
+  value: string;
 };
 
 type StoreState = {
@@ -64,14 +95,6 @@ const emptyStoreState: StoreState = {
   images: [],
 };
 
-const formatDateTime = (value: string) =>
-  new Intl.DateTimeFormat("ko-KR", {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
-
 const readSelection = (): Selection => {
   try {
     return JSON.parse(localStorage.getItem(selectionKey) ?? "{}") as Selection;
@@ -80,7 +103,18 @@ const readSelection = (): Selection => {
   }
 };
 
-const fileToDraftImage = (file: File, fallbackName = "clipboard-image.png"): Promise<DraftImage> =>
+const readAppearanceTheme = (): AppearanceTheme => {
+  try {
+    return localStorage.getItem(appearanceKey) === "dark" ? "dark" : "light";
+  } catch {
+    return "light";
+  }
+};
+
+const fileToDraftImage = (
+  file: File,
+  fallbackName = "clipboard-image.png",
+): Promise<DraftImage> =>
   new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(reader.error);
@@ -117,8 +151,10 @@ const getCurrentClipboardImageFiles = (clipboardData: DataTransfer) => {
 const getVersionKind = (version?: PromptVersion | null): PromptVersionKind =>
   version?.kind ?? "text";
 
-const getTopicKind = (topic?: Topic | null, latestVersion?: PromptVersion | null): PromptVersionKind =>
-  topic?.kind ?? getVersionKind(latestVersion);
+const getTopicKind = (
+  topic?: Topic | null,
+  latestVersion?: PromptVersion | null,
+): PromptVersionKind => topic?.kind ?? getVersionKind(latestVersion);
 
 const getVersionResultText = (version?: PromptVersion | null) => {
   if (!version || getVersionKind(version) !== "text") {
@@ -127,6 +163,9 @@ const getVersionResultText = (version?: PromptVersion | null) => {
 
   return version.resultText ?? version.body;
 };
+
+const getCommitMemo = (notes: string | undefined, fallback: string) =>
+  notes?.trim() || fallback;
 
 const copyImagesToDraft = (images: ImageAsset[]): DraftImage[] =>
   images.map((image) => ({
@@ -137,7 +176,10 @@ const copyImagesToDraft = (images: ImageAsset[]): DraftImage[] =>
     dataUrl: image.dataUrl,
   }));
 
-const draftImagesMatchStoredImages = (draftImages: DraftImage[], storedImages: ImageAsset[]) => {
+const draftImagesMatchStoredImages = (
+  draftImages: DraftImage[],
+  storedImages: ImageAsset[],
+) => {
   if (draftImages.length !== storedImages.length) {
     return false;
   }
@@ -155,18 +197,34 @@ const draftImagesMatchStoredImages = (draftImages: DraftImage[], storedImages: I
 
 export function App() {
   const savedSelection = useMemo(readSelection, []);
+  const [appearanceTheme, setAppearanceTheme] =
+    useState<AppearanceTheme>(readAppearanceTheme);
+  const [locale, setLocale] = useState<Locale>(readLocale);
   const [store, setStore] = useState<StoreState>(emptyStoreState);
-  const [selectedProjectId, setSelectedProjectId] = useState(savedSelection.projectId);
-  const [selectedThemeId, setSelectedThemeId] = useState(savedSelection.themeId);
-  const [selectedTopicId, setSelectedTopicId] = useState(savedSelection.topicId);
+  const [selectedProjectId, setSelectedProjectId] = useState(
+    savedSelection.projectId,
+  );
+  const [selectedThemeId, setSelectedThemeId] = useState(
+    savedSelection.themeId,
+  );
+  const [selectedTopicId, setSelectedTopicId] = useState(
+    savedSelection.topicId,
+  );
   const [activeVersionId, setActiveVersionId] = useState("draft");
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<ToastState | null>(null);
-  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(
+    null,
+  );
   const [confirmBusy, setConfirmBusy] = useState(false);
-  const [sidebarView, setSidebarView] = useState<"explorer" | "history">("explorer");
+  const [sidebarView, setSidebarView] = useState<"explorer" | "history">(
+    "explorer",
+  );
   const [mainView, setMainView] = useState<"write" | "diff">("write");
-  const [createPanel, setCreatePanel] = useState<"project" | "theme" | "topic" | null>(null);
+  const [createPanel, setCreatePanel] = useState<
+    "project" | "theme" | "topic" | null
+  >(null);
+  const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
 
   const [newProjectName, setNewProjectName] = useState("");
   const [newThemeName, setNewThemeName] = useState("");
@@ -182,6 +240,7 @@ export function App() {
   const [draftNotes, setDraftNotes] = useState("");
   const [draftImages, setDraftImages] = useState<DraftImage[]>([]);
   const [pasteTargetActive, setPasteTargetActive] = useState(false);
+  const ui = messages[locale];
 
   const showToast = (message: string, variant: ToastVariant = "success") => {
     setToast({ id: Date.now(), message, variant });
@@ -207,7 +266,10 @@ export function App() {
       await confirmDialog.onConfirm();
       setConfirmDialog(null);
     } catch (confirmError) {
-      showToast(confirmError instanceof Error ? confirmError.message : "작업을 완료하지 못했습니다.", "error");
+      showToast(
+        confirmError instanceof Error ? confirmError.message : ui.actionFailed,
+        "error",
+      );
     } finally {
       setConfirmBusy(false);
     }
@@ -242,7 +304,12 @@ export function App() {
         await loadData(true);
       } catch (loadError) {
         if (mounted) {
-          showToast(loadError instanceof Error ? loadError.message : "IndexedDB를 열 수 없습니다.", "error");
+          showToast(
+            loadError instanceof Error
+              ? loadError.message
+              : ui.indexedDbOpenFailed,
+            "error",
+          );
         }
       } finally {
         if (mounted) {
@@ -258,14 +325,47 @@ export function App() {
     };
   }, []);
 
-  const selectedProject = store.projects.find((project) => project.id === selectedProjectId);
-  const projectThemes = store.themes.filter((theme) => theme.projectId === selectedProjectId);
-  const selectedTheme = projectThemes.find((theme) => theme.id === selectedThemeId);
-  const themeTopics = store.topics.filter(
-    (topic) => topic.projectId === selectedProjectId && topic.themeId === selectedThemeId,
+  useEffect(() => {
+    try {
+      localStorage.setItem(appearanceKey, appearanceTheme);
+    } catch {
+      // Ignore storage failures so theme switching still works for the session.
+    }
+    document.documentElement.dataset.theme = appearanceTheme;
+    document.documentElement.style.colorScheme = appearanceTheme;
+  }, [appearanceTheme]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(localeKey, locale);
+    } catch {
+      // Ignore storage failures so language switching still works for the session.
+    }
+    document.documentElement.lang = locale;
+    document.documentElement.dataset.locale = locale;
+    document.title = ui.appName;
+  }, [locale]);
+
+  const selectedProject = store.projects.find(
+    (project) => project.id === selectedProjectId,
   );
-  const selectedTopic = themeTopics.find((topic) => topic.id === selectedTopicId);
-  const topicVersions = store.versions.filter((version) => version.topicId === selectedTopicId);
+  const projectThemes = store.themes.filter(
+    (theme) => theme.projectId === selectedProjectId,
+  );
+  const selectedTheme = projectThemes.find(
+    (theme) => theme.id === selectedThemeId,
+  );
+  const themeTopics = store.topics.filter(
+    (topic) =>
+      topic.projectId === selectedProjectId &&
+      topic.themeId === selectedThemeId,
+  );
+  const selectedTopic = themeTopics.find(
+    (topic) => topic.id === selectedTopicId,
+  );
+  const topicVersions = store.versions.filter(
+    (version) => version.topicId === selectedTopicId,
+  );
   const latestVersion = topicVersions[topicVersions.length - 1] ?? null;
   const selectedTopicKind = getTopicKind(selectedTopic, latestVersion);
 
@@ -276,50 +376,72 @@ export function App() {
     }, {});
   }, [store.images]);
 
+  const themeCountByProject = useMemo(() => {
+    return store.themes.reduce<Record<string, number>>((acc, theme) => {
+      acc[theme.projectId] = (acc[theme.projectId] ?? 0) + 1;
+      return acc;
+    }, {});
+  }, [store.themes]);
+
+  const topicCountByTheme = useMemo(() => {
+    return store.topics.reduce<Record<string, number>>((acc, topic) => {
+      if (topic.themeId) {
+        acc[topic.themeId] = (acc[topic.themeId] ?? 0) + 1;
+      }
+      return acc;
+    }, {});
+  }, [store.topics]);
+
   useEffect(() => {
-    if (!store.projects.length) {
-      setSelectedProjectId("");
+    if (loading) {
       return;
     }
 
-    if (!selectedProject) {
-      setSelectedProjectId(store.projects[0].id);
+    if (!store.projects.length) {
+      setSelectedProjectId("");
+      setSelectedThemeId("");
+      setSelectedTopicId("");
+      return;
     }
-  }, [selectedProject, store.projects]);
+
+    if (selectedProjectId && !selectedProject) {
+      setSelectedProjectId("");
+      setSelectedThemeId("");
+      setSelectedTopicId("");
+    }
+  }, [loading, selectedProject, selectedProjectId, store.projects.length]);
 
   useEffect(() => {
+    if (loading) {
+      return;
+    }
+
     if (!selectedProjectId) {
       setSelectedThemeId("");
       setSelectedTopicId("");
       return;
     }
 
-    if (!selectedTheme && projectThemes.length > 0) {
-      setSelectedThemeId(projectThemes[0].id);
-      return;
-    }
-
-    if (projectThemes.length === 0) {
+    if (selectedThemeId && !selectedTheme) {
       setSelectedThemeId("");
       setSelectedTopicId("");
     }
-  }, [projectThemes, selectedProjectId, selectedTheme]);
+  }, [loading, selectedProjectId, selectedTheme, selectedThemeId]);
 
   useEffect(() => {
+    if (loading) {
+      return;
+    }
+
     if (!selectedThemeId) {
       setSelectedTopicId("");
       return;
     }
 
-    if (!selectedTopic && themeTopics.length > 0) {
-      setSelectedTopicId(themeTopics[0].id);
-      return;
-    }
-
-    if (themeTopics.length === 0) {
+    if (selectedTopicId && !selectedTopic) {
       setSelectedTopicId("");
     }
-  }, [selectedThemeId, selectedTopic, themeTopics]);
+  }, [loading, selectedThemeId, selectedTopic, selectedTopicId]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -349,7 +471,9 @@ export function App() {
       return;
     }
 
-    setDraftLabel(latestVersion ? `v${topicVersions.length + 1}` : "초안");
+    setDraftLabel(
+      latestVersion ? `v${topicVersions.length + 1}` : ui.draftLabel,
+    );
     setDraftKind(selectedTopicKind);
     setDraftBody(latestVersion?.body ?? "");
     setDraftResultText(getVersionResultText(latestVersion));
@@ -366,9 +490,12 @@ export function App() {
   const selectedStoredVersion =
     activeVersionId === "draft"
       ? null
-      : topicVersions.find((version) => version.id === activeVersionId) ?? null;
+      : (topicVersions.find((version) => version.id === activeVersionId) ??
+        null);
   const selectedStoredIndex = selectedStoredVersion
-    ? topicVersions.findIndex((version) => version.id === selectedStoredVersion.id)
+    ? topicVersions.findIndex(
+        (version) => version.id === selectedStoredVersion.id,
+      )
     : -1;
   const compareBase =
     selectedStoredVersion && selectedStoredIndex > 0
@@ -381,34 +508,46 @@ export function App() {
   const compareBaseText =
     compareTargetKind === "text"
       ? getVersionResultText(compareBase)
-      : compareBase?.body ?? "";
+      : (compareBase?.body ?? "");
   const compareTargetText =
     compareTargetKind === "text"
       ? selectedStoredVersion
         ? getVersionResultText(selectedStoredVersion)
         : draftResultText
-      : selectedStoredVersion?.body ?? draftBody;
-  const compareTargetLabel = selectedStoredVersion?.label ?? "작성 중";
-  const compareBaseImages = compareBase ? imagesByVersion[compareBase.id] ?? [] : [];
+      : (selectedStoredVersion?.body ?? draftBody);
+  const compareTargetLabel = selectedStoredVersion?.label ?? ui.draftMessage;
+  const compareBaseImages = compareBase
+    ? (imagesByVersion[compareBase.id] ?? [])
+    : [];
   const compareTargetImages = selectedStoredVersion
-    ? imagesByVersion[selectedStoredVersion.id] ?? []
+    ? (imagesByVersion[selectedStoredVersion.id] ?? [])
     : draftImages;
-  const latestImages = latestVersion ? imagesByVersion[latestVersion.id] ?? [] : [];
-  const comparableLatestImages = getVersionKind(latestVersion) === "image" ? latestImages : [];
-  const comparableDraftImages = selectedTopicKind === "image" ? draftImages : [];
+  const latestImages = latestVersion
+    ? (imagesByVersion[latestVersion.id] ?? [])
+    : [];
+  const comparableLatestImages =
+    getVersionKind(latestVersion) === "image" ? latestImages : [];
+  const comparableDraftImages =
+    selectedTopicKind === "image" ? draftImages : [];
   const lineDiffRows = useMemo(
     () => diffLines(compareBaseText, compareTargetText),
     [compareBaseText, compareTargetText],
   );
   const addedCount = lineDiffRows.filter((row) => row.type === "added").length;
-  const removedCount = lineDiffRows.filter((row) => row.type === "removed").length;
+  const removedCount = lineDiffRows.filter(
+    (row) => row.type === "removed",
+  ).length;
   const latestComparableResultText =
     selectedTopicKind === "text" ? getVersionResultText(latestVersion) : "";
-  const draftComparableResultText = selectedTopicKind === "text" ? draftResultText : "";
+  const draftComparableResultText =
+    selectedTopicKind === "text" ? draftResultText : "";
   const hasDraftChanges =
     (latestVersion?.body ?? "") !== draftBody ||
     latestComparableResultText !== draftComparableResultText ||
-    !draftImagesMatchStoredImages(comparableDraftImages, comparableLatestImages);
+    !draftImagesMatchStoredImages(
+      comparableDraftImages,
+      comparableLatestImages,
+    );
   const canSaveDraft =
     hasDraftChanges &&
     draftBody.trim().length > 0 &&
@@ -418,7 +557,10 @@ export function App() {
     try {
       await loadData();
     } catch (refreshError) {
-      showToast(refreshError instanceof Error ? refreshError.message : "데이터를 다시 읽을 수 없습니다.", "error");
+      showToast(
+        refreshError instanceof Error ? refreshError.message : ui.refreshFailed,
+        "error",
+      );
     }
   };
 
@@ -443,8 +585,92 @@ export function App() {
     setSelectedThemeId("");
     setSelectedTopicId("");
     setCreatePanel(null);
-    showToast("프로젝트를 저장했습니다.");
+    showToast(ui.projectSaved);
     await refresh();
+  };
+
+  const startRename = (target: RenameTarget) => {
+    setCreatePanel(null);
+    setRenameTarget(target);
+  };
+
+  const updateRenameValue = (value: string) => {
+    setRenameTarget((current) => (current ? { ...current, value } : current));
+  };
+
+  const cancelRename = () => {
+    setRenameTarget(null);
+  };
+
+  const commitRename = async () => {
+    const target = renameTarget;
+    if (!target) {
+      return;
+    }
+
+    const nextValue = target.value.trim();
+    setRenameTarget(null);
+    if (!nextValue) {
+      return;
+    }
+
+    try {
+      if (target.kind === "project") {
+        const project = store.projects.find((item) => item.id === target.id);
+        if (project && project.name !== nextValue) {
+          await putItem("projects", {
+            ...project,
+            name: nextValue,
+            updatedAt: nowIso(),
+          });
+          await refresh();
+        }
+        return;
+      }
+
+      if (target.kind === "theme") {
+        const theme = store.themes.find((item) => item.id === target.id);
+        if (theme && theme.name !== nextValue) {
+          await putItem("themes", {
+            ...theme,
+            name: nextValue,
+            updatedAt: nowIso(),
+          });
+          await refresh();
+        }
+        return;
+      }
+
+      const topic = store.topics.find((item) => item.id === target.id);
+      if (topic && topic.title !== nextValue) {
+        await putItem("topics", {
+          ...topic,
+          title: nextValue,
+          updatedAt: nowIso(),
+        });
+        await refresh();
+      }
+    } catch (renameError) {
+      showToast(
+        renameError instanceof Error ? renameError.message : ui.actionFailed,
+        "error",
+      );
+    }
+  };
+
+  const handleRenameKeyDown = (
+    event: ReactKeyboardEvent<HTMLInputElement>,
+  ) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void commitRename();
+      return;
+    }
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelRename();
+    }
   };
 
   const handleProjectDelete = (projectToDelete = selectedProject) => {
@@ -453,9 +679,9 @@ export function App() {
     }
 
     requestConfirm({
-      title: "프로젝트 삭제",
-      message: `"${projectToDelete.name}" 프로젝트와 포함된 테마, 주제, 버전, 이미지를 모두 삭제할까요?`,
-      confirmLabel: "삭제",
+      title: ui.projectDeleteTitle,
+      message: ui.projectDeleteMessage(projectToDelete.name),
+      confirmLabel: ui.delete,
       onConfirm: () => deleteProject(projectToDelete),
     });
   };
@@ -468,7 +694,11 @@ export function App() {
       .filter((version) => topicIds.includes(version.topicId))
       .map((version) => version.id);
     const imageIds = store.images
-      .filter((image) => topicIds.includes(image.topicId) || versionIds.includes(image.versionId))
+      .filter(
+        (image) =>
+          topicIds.includes(image.topicId) ||
+          versionIds.includes(image.versionId),
+      )
       .map((image) => image.id);
     const themeIds = store.themes
       .filter((theme) => theme.projectId === projectToDelete.id)
@@ -482,11 +712,13 @@ export function App() {
       deleteItem("projects", projectToDelete.id),
     ]);
 
-    const nextProject = store.projects.find((project) => project.id !== projectToDelete.id);
-    setSelectedProjectId(nextProject?.id ?? "");
-    setSelectedTopicId("");
+    if (projectToDelete.id === selectedProjectId) {
+      setSelectedProjectId("");
+      setSelectedThemeId("");
+      setSelectedTopicId("");
+    }
     setCreatePanel(null);
-    showToast("프로젝트를 삭제했습니다.");
+    showToast(ui.projectDeleted);
     await refresh();
   };
 
@@ -511,7 +743,7 @@ export function App() {
     setSelectedThemeId(id);
     setSelectedTopicId("");
     setCreatePanel(null);
-    showToast("테마 폴더를 저장했습니다.");
+    showToast(ui.themeSaved);
     await refresh();
   };
 
@@ -539,15 +771,55 @@ export function App() {
     setNewTopicKind("text");
     setSelectedTopicId(id);
     setCreatePanel(null);
-    showToast("주제를 저장했습니다.");
+    showToast(ui.topicSaved);
+    await refresh();
+  };
+
+  const handleThemeDelete = (theme: Theme) => {
+    requestConfirm({
+      title: ui.themeDeleteTitle,
+      message: ui.themeDeleteMessage(theme.name),
+      confirmLabel: ui.delete,
+      onConfirm: () => deleteTheme(theme),
+    });
+  };
+
+  const deleteTheme = async (theme: Theme) => {
+    const topicIds = store.topics
+      .filter((topic) => topic.themeId === theme.id)
+      .map((topic) => topic.id);
+    const versionIds = store.versions
+      .filter((version) => topicIds.includes(version.topicId))
+      .map((version) => version.id);
+    const imageIds = store.images
+      .filter(
+        (image) =>
+          topicIds.includes(image.topicId) ||
+          versionIds.includes(image.versionId),
+      )
+      .map((image) => image.id);
+
+    await Promise.all([
+      ...imageIds.map((id) => deleteItem("images", id)),
+      ...versionIds.map((id) => deleteItem("versions", id)),
+      ...topicIds.map((id) => deleteItem("topics", id)),
+      deleteItem("themes", theme.id),
+    ]);
+
+    if (theme.id === selectedThemeId) {
+      setSelectedThemeId("");
+      setSelectedTopicId("");
+    }
+    setCreatePanel(null);
+    showToast(ui.themeDeleted);
     await refresh();
   };
 
   const handleTopicDelete = (topic: Topic) => {
     requestConfirm({
-      title: "주제 삭제",
-      message: `"${topic.title}" 주제와 저장된 버전, 이미지를 모두 삭제할까요?`,
-      confirmLabel: "삭제",
+      title: ui.topicDeleteTitle,
+      message: ui.topicDeleteMessage(topic.title),
+      confirmLabel: ui.delete,
       onConfirm: () => deleteTopic(topic),
     });
   };
@@ -557,7 +829,10 @@ export function App() {
       .filter((version) => version.topicId === topic.id)
       .map((version) => version.id);
     const imageIds = store.images
-      .filter((image) => image.topicId === topic.id || versionIds.includes(image.versionId))
+      .filter(
+        (image) =>
+          image.topicId === topic.id || versionIds.includes(image.versionId),
+      )
       .map((image) => image.id);
 
     await Promise.all([
@@ -566,10 +841,11 @@ export function App() {
       deleteItem("topics", topic.id),
     ]);
 
-    const nextTopic = themeTopics.find((themeTopic) => themeTopic.id !== topic.id);
-    setSelectedTopicId(nextTopic?.id ?? "");
+    if (topic.id === selectedTopicId) {
+      setSelectedTopicId("");
+    }
     setCreatePanel(null);
-    showToast("주제를 삭제했습니다.");
+    showToast(ui.topicDeleted);
     await refresh();
   };
 
@@ -579,20 +855,24 @@ export function App() {
       return;
     }
 
-    const loadedImages = await Promise.all(files.map((file) => fileToDraftImage(file)));
+    const loadedImages = await Promise.all(
+      files.map((file) => fileToDraftImage(file)),
+    );
     setDraftImages((current) => [...current, ...loadedImages]);
     setActiveVersionId("draft");
     event.target.value = "";
   };
 
-  const handleImagePaste = async (event: ReactClipboardEvent<HTMLButtonElement>) => {
+  const handleImagePaste = async (
+    event: ReactClipboardEvent<HTMLButtonElement>,
+  ) => {
     if (!selectedTopicId) {
       return;
     }
 
     const files = getCurrentClipboardImageFiles(event.clipboardData);
     if (files.length === 0) {
-      showToast("현재 클립보드에 붙여넣을 이미지가 없습니다.", "error");
+      showToast(ui.noClipboardImage, "error");
       return;
     }
 
@@ -607,9 +887,8 @@ export function App() {
 
     setDraftImages((current) => [...current, ...images]);
     setActiveVersionId("draft");
-    showToast("현재 클립보드의 이미지를 추가했습니다.");
+    showToast(ui.imagesPasted);
   };
-
 
   const handleVersionSave = async () => {
     if (!selectedTopic) {
@@ -618,13 +897,13 @@ export function App() {
 
     const body = draftBody.trim();
     if (!body) {
-      showToast("저장할 프롬프트가 비어 있습니다.", "error");
+      showToast(ui.promptEmpty, "error");
       return;
     }
 
     const resultText = draftResultText.trim();
     if (selectedTopicKind === "text" && !resultText) {
-      showToast("텍스트 결과를 입력해야 합니다.", "error");
+      showToast(ui.enterPromptResult, "error");
       return;
     }
 
@@ -677,16 +956,18 @@ export function App() {
       })),
     );
     setActiveVersionId(versionId);
-    showToast("강화본을 저장했습니다.");
+    showToast(ui.versionSaved);
   };
 
   const handleVersionDelete = (versionId: string) => {
     const version = topicVersions.find((item) => item.id === versionId);
 
     requestConfirm({
-      title: "버전 삭제",
-      message: `"${version?.label ?? "선택한 버전"}" 버전과 연결된 이미지를 삭제할까요?`,
-      confirmLabel: "삭제",
+      title: ui.versionDeleteTitle,
+      message: ui.versionDeleteMessage(
+        version?.label ?? ui.versionDeleteFallback,
+      ),
+      confirmLabel: ui.delete,
       onConfirm: () => deleteVersion(versionId),
     });
   };
@@ -696,10 +977,18 @@ export function App() {
       .filter((image) => image.versionId === versionId)
       .map((image) => image.id);
 
-    await Promise.all([deleteItem("versions", versionId), ...imageIds.map((id) => deleteItem("images", id))]);
-    const remainingVersions = topicVersions.filter((version) => version.id !== versionId);
-    const remainingLatest = remainingVersions[remainingVersions.length - 1] ?? null;
-    setDraftLabel(remainingLatest ? `v${remainingVersions.length + 1}` : "초안");
+    await Promise.all([
+      deleteItem("versions", versionId),
+      ...imageIds.map((id) => deleteItem("images", id)),
+    ]);
+    const remainingVersions = topicVersions.filter(
+      (version) => version.id !== versionId,
+    );
+    const remainingLatest =
+      remainingVersions[remainingVersions.length - 1] ?? null;
+    setDraftLabel(
+      remainingLatest ? `v${remainingVersions.length + 1}` : ui.draftLabel,
+    );
     setDraftKind(getTopicKind(selectedTopic, remainingLatest));
     setDraftBody(remainingLatest?.body ?? "");
     setDraftResultText(getVersionResultText(remainingLatest));
@@ -711,7 +1000,7 @@ export function App() {
     );
     await refresh();
     setActiveVersionId("draft");
-    showToast("버전을 삭제했습니다.");
+    showToast(ui.versionDeleted);
   };
 
   const continueFromVersion = (version: PromptVersion) => {
@@ -721,131 +1010,169 @@ export function App() {
     setDraftResultText(getVersionResultText(version));
     setDraftNotes("");
     setDraftImages(
-      getVersionKind(version) === "image" ? copyImagesToDraft(imagesByVersion[version.id] ?? []) : [],
+      getVersionKind(version) === "image"
+        ? copyImagesToDraft(imagesByVersion[version.id] ?? [])
+        : [],
     );
     setActiveVersionId("draft");
     setMainView("write");
+  };
+
+  const cherryPickVersion = (version: PromptVersion) => {
+    setDraftKind(selectedTopicKind);
+    setDraftBody(version.body);
+    setDraftResultText(getVersionResultText(version));
+    setDraftNotes(`cherry-pick: ${version.label}`);
+    setDraftImages(
+      getVersionKind(version) === "image"
+        ? copyImagesToDraft(imagesByVersion[version.id] ?? [])
+        : [],
+    );
+    setActiveVersionId("draft");
+    setMainView("write");
+    showToast(ui.cherryPickApplied(version.label));
   };
 
   if (loading) {
     return (
       <main className="loading-screen">
         <Sparkles aria-hidden="true" />
-        <span>불러오는 중</span>
+        <span>{ui.loading}</span>
       </main>
     );
   }
 
+  const isDarkTheme = appearanceTheme === "dark";
+  const emptyStateTitle = !selectedProject
+    ? ui.selectProject
+    : !selectedTheme
+      ? ui.selectTheme
+      : ui.selectTopic;
+
   const historySidebar = selectedTopic ? (
     <section className="sidebar-history">
-      <div className="history-header">
-        <div>
-          <h3>
-            <GitBranch aria-hidden="true" size={15} />
-            {selectedTopic.title}
-          </h3>
-          <span>{topicVersions.length} commits</span>
+      <div className="graph-header">
+        <div className="graph-title">
+          <ChevronDown aria-hidden="true" size={13} />
+          <span>GRAPH</span>
         </div>
-        {hasDraftChanges ? <span className="working-tree-badge">working tree</span> : null}
       </div>
-      <div className="commit-graph" aria-label="저장 기록">
+      <div className="git-graph" aria-label="Graph">
         {activeVersionId === "draft" && hasDraftChanges ? (
-          <article className="commit-row draft active">
-            <div className="commit-rail">
-              <span className="commit-line top-hidden" />
-              <span className="commit-dot draft-dot" />
-              <span className="commit-line" />
+          <article className="graph-row draft active">
+            <div className="graph-rail">
+              <span className="graph-node open" />
+              <span className="graph-line" />
             </div>
-            <div className="commit-content">
-              <div className="commit-title-row">
+            <div className="graph-content">
+              <div className="graph-line-row">
                 <button
                   type="button"
-                  className="commit-title"
+                  className="graph-message"
                   onClick={() => {
                     setActiveVersionId("draft");
                     setMainView("diff");
                   }}
                 >
-                  작성 중
+                  {ui.draftMessage}
                 </button>
-                <span className="head-badge">HEAD</span>
+                <span className="branch-pill">
+                  <CircleDot aria-hidden="true" size={14} />
+                  {ui.currentVersion}
+                </span>
               </div>
-              <p>{selectedTopicKind === "text" ? draftResultText || draftBody : draftBody}</p>
+              <div className="graph-subline">
+                {draftNotes.trim() || ui.draftUnsavedChanges}
+              </div>
             </div>
           </article>
         ) : null}
-        {[...topicVersions].reverse().map((version, index, reversedVersions) => {
-          const isActive = version.id === activeVersionId;
-          const preview = selectedTopicKind === "text" ? getVersionResultText(version) : version.body;
-          const shortHash = version.id.replace(/-/g, "").slice(0, 7);
+        {[...topicVersions]
+          .reverse()
+          .map((version, index, reversedVersions) => {
+            const isActive = version.id === activeVersionId;
+            const isLatest =
+              index === 0 && !(activeVersionId === "draft" && hasDraftChanges);
 
-          return (
-            <article key={version.id} className={`commit-row ${isActive ? "active" : ""}`}>
-              <div className="commit-rail">
-                <span
-                  className={`commit-line ${
-                    index === 0 && !(activeVersionId === "draft" && hasDraftChanges) ? "top-hidden" : ""
-                  }`}
-                />
-                <span className="commit-dot">
-                  <GitCommitHorizontal aria-hidden="true" size={13} />
-                </span>
-                <span
-                  className={`commit-line ${
-                    index === reversedVersions.length - 1 ? "bottom-hidden" : ""
-                  }`}
-                />
-              </div>
-              <div className="commit-content">
-                <div className="commit-title-row">
-                  <button
-                    type="button"
-                    className="commit-title"
-                    onClick={() => {
-                      setActiveVersionId(version.id);
-                      setMainView("diff");
-                    }}
-                  >
-                    {version.label}
-                  </button>
-                  {isActive ? <span className="head-badge">HEAD</span> : null}
-                  <KindBadge kind={selectedTopicKind} />
+            return (
+              <article
+                key={version.id}
+                className={`graph-row ${isActive ? "active" : ""}`}
+              >
+                <div className="graph-rail">
+                  <span
+                    className={`graph-line top ${isLatest ? "hidden" : ""}`}
+                  />
+                  <span className="graph-node filled" />
+                  <span
+                    className={`graph-line bottom ${
+                      index === reversedVersions.length - 1 ? "hidden" : ""
+                    }`}
+                  />
                 </div>
-                <div className="commit-meta">
-                  <span>{shortHash}</span>
-                  <span>
-                    <Clock3 aria-hidden="true" size={13} />
-                    {formatDateTime(version.createdAt)}
-                  </span>
+                <div className="graph-content">
+                  <div className="graph-line-row">
+                    <button
+                      type="button"
+                      className="graph-message"
+                      onClick={() => {
+                        setActiveVersionId(version.id);
+                        setMainView("diff");
+                      }}
+                    >
+                      {version.label}
+                    </button>
+                    {isLatest ? (
+                      <span className="branch-pill">
+                        <CircleDot aria-hidden="true" size={14} />
+                        {ui.currentVersion}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="graph-subline">
+                    <span>
+                      {getCommitMemo(version.notes, ui.commitMemoFallback)}
+                    </span>
+                  </div>
+                  <div className="graph-actions">
+                    <button
+                      type="button"
+                      onClick={() => continueFromVersion(version)}
+                    >
+                      checkout
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => cherryPickVersion(version)}
+                    >
+                      cherry-pick
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleVersionDelete(version.id)}
+                    >
+                      delete
+                    </button>
+                  </div>
                 </div>
-                <p>{preview}</p>
-                <div className="commit-actions">
-                  <button type="button" onClick={() => continueFromVersion(version)}>
-                    checkout
-                  </button>
-                  <button type="button" onClick={() => handleVersionDelete(version.id)}>
-                    delete
-                  </button>
-                </div>
-              </div>
-            </article>
-          );
-        })}
+              </article>
+            );
+          })}
         {topicVersions.length === 0 ? (
-          <div className="empty-commit-log">아직 저장된 커밋이 없습니다.</div>
+          <div className="empty-commit-log">{ui.emptyCommitLog}</div>
         ) : null}
       </div>
     </section>
   ) : (
     <section className="sidebar-history empty-sidebar-history">
       <GitBranch aria-hidden="true" size={18} />
-      <span>주제를 선택하세요</span>
+      <span>{ui.selectTopic}</span>
     </section>
   );
 
   return (
-    <div className="app-shell">
-      <nav className="activity-bar" aria-label="작업 보기">
+    <div className="app-shell" data-theme={appearanceTheme}>
+      <nav className="activity-bar" aria-label={ui.workViewAria}>
         <button
           type="button"
           className={sidebarView === "explorer" ? "active" : ""}
@@ -864,286 +1191,481 @@ export function App() {
         >
           <GitBranch aria-hidden="true" size={19} />
         </button>
+        <button
+          type="button"
+          className="theme-toggle-button"
+          onClick={() => setAppearanceTheme(isDarkTheme ? "light" : "dark")}
+          aria-label={isDarkTheme ? ui.switchToLightAria : ui.switchToDarkAria}
+          title={isDarkTheme ? ui.switchToLightTitle : ui.switchToDarkTitle}
+        >
+          {isDarkTheme ? (
+            <Sun aria-hidden="true" size={19} />
+          ) : (
+            <Moon aria-hidden="true" size={19} />
+          )}
+        </button>
+        <button
+          type="button"
+          className="language-toggle-button"
+          onClick={() => setLocale(locale === "ko" ? "en" : "ko")}
+          aria-label={ui.languageToggleAria}
+          title={ui.languageToggleAria}
+        >
+          <span>{locale === "ko" ? "KO" : "EN"}</span>
+        </button>
       </nav>
 
       <aside className="sidebar">
-        <header className="brand">
-          <div className="brand-mark">
-            <Sparkles aria-hidden="true" size={19} />
-          </div>
+        <header className="sidebar-header">
           <div>
-            <h1>Prompt Reinforcer</h1>
-            <p>IndexedDB</p>
+            <span className="sidebar-view-title">
+              {sidebarView === "explorer" ? ui.explorer : "History"}
+            </span>
+            <strong>{ui.appName}</strong>
           </div>
         </header>
-
-        <div className="sidebar-view-title">{sidebarView === "explorer" ? "Explorer" : "History"}</div>
 
         {sidebarView === "explorer" ? (
           <div className="explorer-pane">
             <section className="sidebar-section">
-          <div className="section-title">
-            <span className="section-title-label">
-              <PanelLeft aria-hidden="true" size={16} />
-              프로젝트
-            </span>
-            <button
-              type="button"
-              className="mini-icon-button"
-              onClick={() => setCreatePanel(createPanel === "project" ? null : "project")}
-              aria-label="프로젝트 추가"
-            >
-              <FolderPlus aria-hidden="true" size={15} />
-            </button>
-          </div>
-          <div className="project-list">
-            {store.projects.map((project) => (
-              <div
-                key={project.id}
-                className={`project-row ${project.id === selectedProjectId ? "active" : ""}`}
-              >
-                <button
-                  type="button"
-                  className="project-row-main"
-                  onClick={() => {
-                    setSelectedProjectId(project.id);
-                    setSelectedThemeId("");
-                    setSelectedTopicId("");
-                  }}
-                >
-                  <span>{project.name}</span>
-                </button>
-                <button
-                  type="button"
-                  className="row-delete-button"
-                  onClick={() => handleProjectDelete(project)}
-                  aria-label={`${project.name} 삭제`}
-                >
-                  <Trash2 aria-hidden="true" size={14} />
-                </button>
-              </div>
-            ))}
-          </div>
-          {createPanel === "project" ? (
-            <form className="create-form create-panel" onSubmit={handleProjectCreate}>
-              <div className="create-panel-header">
-                <span>새 프로젝트</span>
+              <div className="section-title">
+                <span className="section-title-label">
+                  <ChevronDown aria-hidden="true" size={13} />
+                  {ui.projectsSection}
+                  <small>{store.projects.length}</small>
+                </span>
                 <button
                   type="button"
                   className="mini-icon-button"
-                  onClick={() => setCreatePanel(null)}
-                  aria-label="닫기"
+                  onClick={() =>
+                    setCreatePanel(createPanel === "project" ? null : "project")
+                  }
+                  aria-label={ui.addProject}
                 >
-                  <X aria-hidden="true" size={14} />
+                  <FolderPlus aria-hidden="true" size={15} />
                 </button>
               </div>
-              <label className="create-field">
-                <span>이름</span>
-                <input
-                  value={newProjectName}
-                  onChange={(event) => setNewProjectName(event.target.value)}
-                  placeholder="project-name"
-                />
-              </label>
-              <div className="create-actions">
-                <button type="button" className="secondary-button" onClick={() => setCreatePanel(null)}>
-                  취소
-                </button>
-                <button type="submit" className="primary-small-button">
-                  <Plus aria-hidden="true" size={15} />
-                  추가
-                </button>
-              </div>
-            </form>
-          ) : null}
-            </section>
+              <div className="project-list">
+                {store.projects.map((project) => {
+                  const isRenaming =
+                    renameTarget?.kind === "project" &&
+                    renameTarget.id === project.id;
 
-            <section className="sidebar-section">
-          <div className="section-title">
-            <span className="section-title-label">
-              <Layers3 aria-hidden="true" size={16} />
-              테마
-            </span>
-            <button
-              type="button"
-              className="mini-icon-button"
-              onClick={() => setCreatePanel(createPanel === "theme" ? null : "theme")}
-              aria-label="테마 추가"
-            >
-              <Plus aria-hidden="true" size={15} />
-            </button>
-          </div>
-          <div className="theme-list">
-            {projectThemes.map((theme) => (
-              <button
-                key={theme.id}
-                type="button"
-                className={`theme-row ${theme.id === selectedThemeId ? "active" : ""}`}
-                onClick={() => {
-                  setSelectedThemeId(theme.id);
-                  setSelectedTopicId("");
-                }}
-              >
-                <span className="swatch" style={{ backgroundColor: theme.color }} />
-                <span>{theme.name}</span>
-              </button>
-            ))}
-          </div>
-          {createPanel === "theme" ? (
-            <form className="create-form create-panel" onSubmit={handleThemeCreate}>
-              <div className="create-panel-header">
-                <span>새 테마</span>
-                <button
-                  type="button"
-                  className="mini-icon-button"
-                  onClick={() => setCreatePanel(null)}
-                  aria-label="닫기"
-                >
-                  <X aria-hidden="true" size={14} />
-                </button>
+                  return (
+                    <div
+                      key={project.id}
+                      className={`project-row ${project.id === selectedProjectId ? "active" : ""} ${isRenaming ? "renaming" : ""}`}
+                    >
+                      {isRenaming ? (
+                        <div className="project-row-main row-main-editing">
+                          {project.id === selectedProjectId ? (
+                            <FolderOpen aria-hidden="true" size={15} />
+                          ) : (
+                            <Folder aria-hidden="true" size={15} />
+                          )}
+                          <input
+                            className="rename-input"
+                            value={renameTarget.value}
+                            autoFocus
+                            onChange={(event) =>
+                              updateRenameValue(event.target.value)
+                            }
+                            onBlur={() => void commitRename()}
+                            onKeyDown={handleRenameKeyDown}
+                          />
+                          <small className="tree-count">
+                            {themeCountByProject[project.id] ?? 0}
+                          </small>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="project-row-main"
+                          onClick={() => {
+                            setSelectedProjectId(project.id);
+                            setSelectedThemeId("");
+                            setSelectedTopicId("");
+                            setCreatePanel(null);
+                          }}
+                          onDoubleClick={() =>
+                            startRename({
+                              kind: "project",
+                              id: project.id,
+                              value: project.name,
+                            })
+                          }
+                        >
+                          {project.id === selectedProjectId ? (
+                            <FolderOpen aria-hidden="true" size={15} />
+                          ) : (
+                            <Folder aria-hidden="true" size={15} />
+                          )}
+                          <span>{project.name}</span>
+                          <small className="tree-count">
+                            {themeCountByProject[project.id] ?? 0}
+                          </small>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="row-delete-button"
+                        onClick={() => handleProjectDelete(project)}
+                        aria-label={ui.deleteProjectAria(project.name)}
+                      >
+                        <Trash2 aria-hidden="true" size={14} />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
-              <label className="create-field">
-                <span>이름</span>
-                <input
-                  value={newThemeName}
-                  onChange={(event) => setNewThemeName(event.target.value)}
-                  placeholder="folder-name"
-                />
-              </label>
-              <div className="create-field">
-                <span>색상</span>
-                <div className="color-row">
-                  {themeColors.map((color) => (
+              {createPanel === "project" ? (
+                <form
+                  className="create-form create-panel"
+                  onSubmit={handleProjectCreate}
+                >
+                  <div className="create-panel-header">
+                    <span>{ui.newProject}</span>
                     <button
-                      key={color}
                       type="button"
-                      className={`color-dot ${newThemeColor === color ? "selected" : ""}`}
-                      style={{ backgroundColor: color }}
-                      onClick={() => setNewThemeColor(color)}
-                      aria-label={`테마 색상 ${color}`}
+                      className="mini-icon-button"
+                      onClick={() => setCreatePanel(null)}
+                      aria-label={ui.close}
+                    >
+                      <X aria-hidden="true" size={14} />
+                    </button>
+                  </div>
+                  <label className="create-field">
+                    <span>{ui.name}</span>
+                    <input
+                      value={newProjectName}
+                      onChange={(event) =>
+                        setNewProjectName(event.target.value)
+                      }
+                      placeholder={ui.projectNamePlaceholder}
                     />
-                  ))}
-                </div>
-              </div>
-              <div className="create-actions">
-                <button type="button" className="secondary-button" onClick={() => setCreatePanel(null)}>
-                  취소
-                </button>
-                <button type="submit" className="primary-small-button">
-                  <Plus aria-hidden="true" size={15} />
-                  추가
-                </button>
-              </div>
-            </form>
-          ) : null}
+                  </label>
+                  <div className="create-actions">
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => setCreatePanel(null)}
+                    >
+                      {ui.cancel}
+                    </button>
+                    <button type="submit" className="primary-small-button">
+                      {ui.add}
+                    </button>
+                  </div>
+                </form>
+              ) : null}
             </section>
 
-            <section className="sidebar-section topic-section">
-          <div className="section-title">
-            <span className="section-title-label">
-              <Diff aria-hidden="true" size={16} />
-              주제
-            </span>
-            <button
-              type="button"
-              className="mini-icon-button"
-              onClick={() => setCreatePanel(createPanel === "topic" ? null : "topic")}
-              aria-label="주제 추가"
-            >
-              <Plus aria-hidden="true" size={15} />
-            </button>
-          </div>
-          <div className="topic-list">
-            {themeTopics.map((topic) => {
-              const count = store.versions.filter((version) => version.topicId === topic.id).length;
-              return (
-                <div
-                  key={topic.id}
-                  className={`topic-row ${topic.id === selectedTopicId ? "active" : ""}`}
-                >
-                  <button
-                    type="button"
-                    className="topic-row-main"
-                    onClick={() => setSelectedTopicId(topic.id)}
-                  >
-                    <span>{topic.title}</span>
-                    <small>{count}</small>
-                  </button>
-                  <button
-                    type="button"
-                    className="row-delete-button"
-                    onClick={() => handleTopicDelete(topic)}
-                    aria-label={`${topic.title} 삭제`}
-                  >
-                    <Trash2 aria-hidden="true" size={14} />
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-          {createPanel === "topic" ? (
-            <form className="create-form create-panel" onSubmit={handleTopicCreate}>
-              <div className="create-panel-header">
-                <span>새 주제</span>
+            {selectedProject ? (
+              <section className="sidebar-section">
+              <div className="section-title">
+                <span className="section-title-label">
+                  <ChevronDown aria-hidden="true" size={13} />
+                  {ui.themesSection}
+                  <small>{projectThemes.length}</small>
+                </span>
                 <button
                   type="button"
                   className="mini-icon-button"
-                  onClick={() => setCreatePanel(null)}
-                  aria-label="닫기"
+                  onClick={() =>
+                    setCreatePanel(createPanel === "theme" ? null : "theme")
+                  }
+                  aria-label={ui.addTheme}
                 >
-                  <X aria-hidden="true" size={14} />
-                </button>
-              </div>
-              <div className="create-field">
-                <span>결과</span>
-                <div className="result-type-control compact-kind-control" aria-label="주제 결과 타입">
-                  <button
-                    type="button"
-                    className={`segment-button ${newTopicKind === "text" ? "active" : ""}`}
-                    onClick={() => setNewTopicKind("text")}
-                  >
-                    <FileText aria-hidden="true" size={15} />
-                    텍스트
-                  </button>
-                  <button
-                    type="button"
-                    className={`segment-button ${newTopicKind === "image" ? "active" : ""}`}
-                    onClick={() => setNewTopicKind("image")}
-                  >
-                    <ImageIcon aria-hidden="true" size={15} />
-                    이미지
-                  </button>
-                </div>
-              </div>
-              <label className="create-field">
-                <span>이름</span>
-                <input
-                  value={newTopicTitle}
-                  onChange={(event) => setNewTopicTitle(event.target.value)}
-                  placeholder="topic-name"
-                />
-              </label>
-              <label className="create-field">
-                <span>메모</span>
-                <textarea
-                  value={newTopicBrief}
-                  onChange={(event) => setNewTopicBrief(event.target.value)}
-                  placeholder="optional"
-                  rows={3}
-                />
-              </label>
-              <div className="create-actions">
-                <button type="button" className="secondary-button" onClick={() => setCreatePanel(null)}>
-                  취소
-                </button>
-                <button type="submit" className="primary-small-button">
                   <Plus aria-hidden="true" size={15} />
-                  추가
                 </button>
               </div>
-            </form>
-          ) : null}
-            </section>
+              <div className="theme-list">
+                {projectThemes.map((theme) => {
+                  const isRenaming =
+                    renameTarget?.kind === "theme" &&
+                    renameTarget.id === theme.id;
+                  const ThemeIcon =
+                    theme.id === selectedThemeId ? FolderOpen : Folder;
+
+                  return (
+                    <div
+                      key={theme.id}
+                      className={`theme-row ${theme.id === selectedThemeId ? "active" : ""} ${isRenaming ? "renaming" : ""}`}
+                    >
+                      {isRenaming ? (
+                        <div className="theme-row-main row-main-editing">
+                          <ThemeIcon
+                            aria-hidden="true"
+                            className="theme-folder-icon"
+                            size={15}
+                            style={{ color: theme.color }}
+                          />
+                          <input
+                            className="rename-input"
+                            value={renameTarget.value}
+                            autoFocus
+                            onChange={(event) =>
+                              updateRenameValue(event.target.value)
+                            }
+                            onBlur={() => void commitRename()}
+                            onKeyDown={handleRenameKeyDown}
+                          />
+                          <small className="tree-count">
+                            {topicCountByTheme[theme.id] ?? 0}
+                          </small>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="theme-row-main"
+                          onClick={() => {
+                            setSelectedThemeId(theme.id);
+                            setSelectedTopicId("");
+                            setCreatePanel(null);
+                          }}
+                          onDoubleClick={() =>
+                            startRename({
+                              kind: "theme",
+                              id: theme.id,
+                              value: theme.name,
+                            })
+                          }
+                        >
+                          <ThemeIcon
+                            aria-hidden="true"
+                            className="theme-folder-icon"
+                            size={15}
+                            style={{ color: theme.color }}
+                          />
+                          <span>{theme.name}</span>
+                          <small className="tree-count">
+                            {topicCountByTheme[theme.id] ?? 0}
+                          </small>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="row-delete-button"
+                        onClick={() => handleThemeDelete(theme)}
+                        aria-label={ui.deleteThemeAria(theme.name)}
+                      >
+                        <Trash2 aria-hidden="true" size={14} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              {createPanel === "theme" ? (
+                <form
+                  className="create-form create-panel"
+                  onSubmit={handleThemeCreate}
+                >
+                  <div className="create-panel-header">
+                    <span>{ui.newTheme}</span>
+                    <button
+                      type="button"
+                      className="mini-icon-button"
+                      onClick={() => setCreatePanel(null)}
+                      aria-label={ui.close}
+                    >
+                      <X aria-hidden="true" size={14} />
+                    </button>
+                  </div>
+                  <label className="create-field">
+                    <span>{ui.name}</span>
+                    <input
+                      value={newThemeName}
+                      onChange={(event) => setNewThemeName(event.target.value)}
+                      placeholder={ui.themeNamePlaceholder}
+                    />
+                  </label>
+                  <div className="create-field">
+                    <span>{ui.color}</span>
+                    <div className="color-row">
+                      {themeColors.map((color) => (
+                        <button
+                          key={color}
+                          type="button"
+                          className={`color-dot ${newThemeColor === color ? "selected" : ""}`}
+                          style={{ backgroundColor: color }}
+                          onClick={() => setNewThemeColor(color)}
+                          aria-label={ui.colorAria(color)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                  <div className="create-actions">
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => setCreatePanel(null)}
+                    >
+                      {ui.cancel}
+                    </button>
+                    <button type="submit" className="primary-small-button">
+                      {ui.add}
+                    </button>
+                  </div>
+                </form>
+              ) : null}
+              </section>
+            ) : null}
+
+            {selectedTheme ? (
+              <section className="sidebar-section topic-section">
+              <div className="section-title">
+                <span className="section-title-label">
+                  <ChevronDown aria-hidden="true" size={13} />
+                  {ui.topicsSection}
+                  <small>{themeTopics.length}</small>
+                </span>
+                <button
+                  type="button"
+                  className="mini-icon-button"
+                  onClick={() =>
+                    setCreatePanel(createPanel === "topic" ? null : "topic")
+                  }
+                  aria-label={ui.addTopic}
+                >
+                  <Plus aria-hidden="true" size={15} />
+                </button>
+              </div>
+              <div className="topic-list">
+                {themeTopics.map((topic) => {
+                  const count = store.versions.filter(
+                    (version) => version.topicId === topic.id,
+                  ).length;
+                  const isRenaming =
+                    renameTarget?.kind === "topic" &&
+                    renameTarget.id === topic.id;
+                  const TopicIcon =
+                    getTopicKind(topic) === "image" ? FileImage : FileText;
+                  return (
+                    <div
+                      key={topic.id}
+                      className={`topic-row ${topic.id === selectedTopicId ? "active" : ""} ${isRenaming ? "renaming" : ""}`}
+                    >
+                      {isRenaming ? (
+                        <div className="topic-row-main row-main-editing">
+                          <TopicIcon aria-hidden="true" size={15} />
+                          <input
+                            className="rename-input"
+                            value={renameTarget.value}
+                            autoFocus
+                            onChange={(event) =>
+                              updateRenameValue(event.target.value)
+                            }
+                            onBlur={() => void commitRename()}
+                            onKeyDown={handleRenameKeyDown}
+                          />
+                          <small className="tree-count">{count}</small>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="topic-row-main"
+                          onClick={() => {
+                            setSelectedTopicId(topic.id);
+                            setCreatePanel(null);
+                          }}
+                          onDoubleClick={() =>
+                            startRename({
+                              kind: "topic",
+                              id: topic.id,
+                              value: topic.title,
+                            })
+                          }
+                        >
+                          <TopicIcon aria-hidden="true" size={15} />
+                          <span>{topic.title}</span>
+                          <small className="tree-count">{count}</small>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="row-delete-button"
+                        onClick={() => handleTopicDelete(topic)}
+                        aria-label={ui.deleteTopicAria(topic.title)}
+                      >
+                        <Trash2 aria-hidden="true" size={14} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              {createPanel === "topic" ? (
+                <form
+                  className="create-form create-panel"
+                  onSubmit={handleTopicCreate}
+                >
+                  <div className="create-panel-header">
+                    <span>{ui.newTopic}</span>
+                    <button
+                      type="button"
+                      className="mini-icon-button"
+                      onClick={() => setCreatePanel(null)}
+                      aria-label={ui.close}
+                    >
+                      <X aria-hidden="true" size={14} />
+                    </button>
+                  </div>
+                  <div className="create-field">
+                    <span>{ui.result}</span>
+                    <div
+                      className="result-type-control compact-kind-control"
+                      aria-label={ui.topicKindAria}
+                    >
+                      <button
+                        type="button"
+                        className={`segment-button ${newTopicKind === "text" ? "active" : ""}`}
+                        onClick={() => setNewTopicKind("text")}
+                      >
+                        <FileText aria-hidden="true" size={15} />
+                        {ui.text}
+                      </button>
+                      <button
+                        type="button"
+                        className={`segment-button ${newTopicKind === "image" ? "active" : ""}`}
+                        onClick={() => setNewTopicKind("image")}
+                      >
+                        <ImageIcon aria-hidden="true" size={15} />
+                        {ui.image}
+                      </button>
+                    </div>
+                  </div>
+                  <label className="create-field">
+                    <span>{ui.name}</span>
+                    <input
+                      value={newTopicTitle}
+                      onChange={(event) => setNewTopicTitle(event.target.value)}
+                      placeholder={ui.topicNamePlaceholder}
+                    />
+                  </label>
+                  <label className="create-field">
+                    <span>{ui.memo}</span>
+                    <textarea
+                      value={newTopicBrief}
+                      onChange={(event) => setNewTopicBrief(event.target.value)}
+                      placeholder={ui.topicMemoPlaceholder}
+                      rows={3}
+                    />
+                  </label>
+                  <div className="create-actions">
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => setCreatePanel(null)}
+                    >
+                      {ui.cancel}
+                    </button>
+                    <button type="submit" className="primary-small-button">
+                      {ui.add}
+                    </button>
+                  </div>
+                </form>
+              ) : null}
+              </section>
+            ) : null}
           </div>
         ) : (
           historySidebar
@@ -1156,7 +1678,12 @@ export function App() {
             <header className="workspace-header">
               <div>
                 <div className="eyebrow">
-                  <span className="swatch" style={{ backgroundColor: selectedTheme?.color }} />
+                  <span
+                    className="theme-folder-mark"
+                    style={{ color: selectedTheme?.color }}
+                  >
+                    <Folder aria-hidden="true" size={14} />
+                  </span>
                   {selectedProject?.name} / {selectedTheme?.name}
                 </div>
                 <h2>{selectedTopic.title}</h2>
@@ -1169,18 +1696,18 @@ export function App() {
                 disabled={!canSaveDraft}
               >
                 <Save aria-hidden="true" size={17} />
-                강화본 저장
+                {ui.saveVersion}
               </button>
             </header>
 
-            <nav className="workspace-tabs" aria-label="메인 보기">
+            <nav className="workspace-tabs" aria-label={ui.workspaceTabsAria}>
               <button
                 type="button"
                 className={mainView === "write" ? "active" : ""}
                 onClick={() => setMainView("write")}
               >
                 <FileText aria-hidden="true" size={15} />
-                작성
+                {ui.write}
               </button>
               <button
                 type="button"
@@ -1198,173 +1725,209 @@ export function App() {
             <div className="main-view">
               {mainView === "write" ? (
                 <section className="panel editor-panel">
-                <div className="panel-heading">
-                  <h3>작성</h3>
-                  <span>
-                    프롬프트 {draftBody.length.toLocaleString()}자
-                    {selectedTopicKind === "text"
-                      ? ` / 결과 ${draftResultText.length.toLocaleString()}자`
-                      : ""}
-                  </span>
-                </div>
-                <label>
-                  버전 이름
-                  <input
-                    value={draftLabel}
-                    onChange={(event) => {
-                      setDraftLabel(event.target.value);
-                      setActiveVersionId("draft");
-                    }}
-                    placeholder="v2, 상세 강화안"
-                  />
-                </label>
-                <label className="editor-field">
-                  프롬프트
-                  <textarea
-                    value={draftBody}
-                    onChange={(event) => {
-                      setDraftBody(event.target.value);
-                      setActiveVersionId("draft");
-                    }}
-                    placeholder="강화한 프롬프트를 작성"
-                  />
-                </label>
-                {selectedTopicKind === "text" ? (
-                  <label className="editor-field result-text-field">
-                    결과 텍스트
-                    <textarea
-                      value={draftResultText}
+                  <div className="panel-heading">
+                    <h3>{ui.write}</h3>
+                    <span>
+                      {ui.promptChars(
+                        draftBody.length.toLocaleString(),
+                        selectedTopicKind === "text"
+                          ? draftResultText.length.toLocaleString()
+                          : undefined,
+                      )}
+                    </span>
+                  </div>
+                  <label>
+                    {ui.versionName}
+                    <input
+                      value={draftLabel}
                       onChange={(event) => {
-                        setDraftResultText(event.target.value);
+                        setDraftLabel(event.target.value);
                         setActiveVersionId("draft");
                       }}
-                      placeholder="프롬프트 실행 결과로 나온 텍스트를 저장"
+                      placeholder={ui.versionNamePlaceholder}
                     />
                   </label>
-                ) : null}
-                <label>
-                  변경 메모
-                  <textarea
-                    value={draftNotes}
-                    onChange={(event) => {
-                      setDraftNotes(event.target.value);
-                      setActiveVersionId("draft");
-                    }}
-                    placeholder="의도, 제약, 참고사항"
-                    rows={3}
-                  />
-                </label>
+                  <label className="editor-field">
+                    {ui.prompt}
+                    <textarea
+                      value={draftBody}
+                      onChange={(event) => {
+                        setDraftBody(event.target.value);
+                        setActiveVersionId("draft");
+                      }}
+                      placeholder={ui.promptPlaceholder}
+                    />
+                  </label>
+                  {selectedTopicKind === "text" ? (
+                    <label className="editor-field result-text-field">
+                      {ui.resultText}
+                      <textarea
+                        value={draftResultText}
+                        onChange={(event) => {
+                          setDraftResultText(event.target.value);
+                          setActiveVersionId("draft");
+                        }}
+                        placeholder={ui.resultTextPlaceholder}
+                      />
+                    </label>
+                  ) : null}
+                  <label>
+                    {ui.notes}
+                    <textarea
+                      value={draftNotes}
+                      onChange={(event) => {
+                        setDraftNotes(event.target.value);
+                        setActiveVersionId("draft");
+                      }}
+                      placeholder={ui.notesPlaceholder}
+                      rows={3}
+                    />
+                  </label>
 
-                {selectedTopicKind === "image" ? (
-                  <div className="image-result-section">
-                    <div className="image-input-panel">
-                      <div className="upload-row">
-                        <label className="file-button">
-                          <ImagePlus aria-hidden="true" size={17} />
-                          결과 이미지 추가
-                          <input type="file" accept="image/*" multiple onChange={handleImageUpload} />
-                        </label>
-                        <span>작성본 이미지 {draftImages.length}개</span>
+                  {selectedTopicKind === "image" ? (
+                    <div className="image-result-section">
+                      <div className="image-input-panel">
+                        <div className="upload-row">
+                          <label className="file-button">
+                            <ImagePlus aria-hidden="true" size={17} />
+                            {ui.resultImageUpload}
+                            <input
+                              type="file"
+                              accept="image/*"
+                              multiple
+                              onChange={handleImageUpload}
+                            />
+                          </label>
+                          <span>{ui.resultImageCount(draftImages.length)}</span>
+                        </div>
+                        <button
+                          type="button"
+                          className={`paste-target ${pasteTargetActive ? "active" : ""}`}
+                          onClick={(event) => event.currentTarget.focus()}
+                          onFocus={() => setPasteTargetActive(true)}
+                          onBlur={() => setPasteTargetActive(false)}
+                          onPaste={handleImagePaste}
+                        >
+                          <ClipboardPaste aria-hidden="true" size={18} />
+                          <span>
+                            <strong>{ui.pasteImage}</strong>
+                            <small>{ui.pasteImageHint}</small>
+                          </span>
+                        </button>
                       </div>
-                      <button
-                        type="button"
-                        className={`paste-target ${pasteTargetActive ? "active" : ""}`}
-                        onClick={(event) => event.currentTarget.focus()}
-                        onFocus={() => setPasteTargetActive(true)}
-                        onBlur={() => setPasteTargetActive(false)}
-                        onPaste={handleImagePaste}
-                      >
-                        <ClipboardPaste aria-hidden="true" size={18} />
-                        <span>
-                          <strong>결과 이미지 붙여넣기</strong>
-                          <small>이 영역을 선택하고 붙여넣기</small>
-                        </span>
-                      </button>
+
+                      {draftImages.length > 0 ? (
+                        <div className="image-grid compact">
+                          {draftImages.map((image) => (
+                            <figure key={image.id} className="image-tile">
+                              <img src={image.dataUrl} alt={image.name} />
+                              <figcaption>
+                                <span>{image.name}</span>
+                                <button
+                                  type="button"
+                                  className="ghost-icon"
+                                  onClick={() =>
+                                    setDraftImages((current) =>
+                                      current.filter(
+                                        (item) => item.id !== image.id,
+                                      ),
+                                    )
+                                  }
+                                  aria-label={ui.deleteImageAria(image.name)}
+                                >
+                                  <Trash2 aria-hidden="true" size={14} />
+                                </button>
+                              </figcaption>
+                            </figure>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
-
-                    {draftImages.length > 0 ? (
-                      <div className="image-grid compact">
-                        {draftImages.map((image) => (
-                          <figure key={image.id} className="image-tile">
-                            <img src={image.dataUrl} alt={image.name} />
-                            <figcaption>
-                              <span>{image.name}</span>
-                              <button
-                                type="button"
-                                className="ghost-icon"
-                                onClick={() =>
-                                  setDraftImages((current) => current.filter((item) => item.id !== image.id))
-                                }
-                                aria-label={`${image.name} 삭제`}
-                              >
-                                <Trash2 aria-hidden="true" size={14} />
-                              </button>
-                            </figcaption>
-                          </figure>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-              </section>
+                  ) : null}
+                </section>
               ) : (
                 <section className="panel diff-panel">
-                <div className="diff-titlebar">
-                  <div className="editor-tab active">
-                    <Diff aria-hidden="true" size={15} />
-                    {compareTargetKind === "text" ? "result.diff" : "prompt.diff"}
+                  <div className="diff-titlebar">
+                    <div className="editor-tab active">
+                      <Diff aria-hidden="true" size={15} />
+                      {"prompt.diff"}
+                    </div>
+                    <div className="diff-summary">
+                      <span className="added">+{addedCount}</span>
+                      <span className="removed">-{removedCount}</span>
+                    </div>
                   </div>
-                  <div className="diff-summary">
-                    <span className="added">+{addedCount}</span>
-                    <span className="removed">-{removedCount}</span>
+                  <div
+                    className="split-diff"
+                    aria-label={
+                      compareTargetKind === "text"
+                        ? ui.promptDiffAria
+                        : ui.imageDiffAria
+                    }
+                  >
+                    <DiffFile
+                      side="left"
+                      title={compareBase?.label ?? ui.noPreviousVersion}
+                      kind={compareBase ? compareBaseKind : null}
+                      rows={lineDiffRows}
+                      emptyLabel={ui.emptyContent}
+                      imageLabel={ui.imageKind}
+                      textLabel={ui.textKind}
+                    />
+                    <DiffFile
+                      side="right"
+                      title={compareTargetLabel}
+                      kind={compareTargetKind}
+                      rows={lineDiffRows}
+                      emptyLabel={ui.emptyContent}
+                      imageLabel={ui.imageKind}
+                      textLabel={ui.textKind}
+                    />
                   </div>
-                </div>
-                <div
-                  className="split-diff"
-                  aria-label={compareTargetKind === "text" ? "결과 텍스트 차이" : "프롬프트 차이"}
-                >
-                  <DiffFile
-                    side="left"
-                    title={compareBase?.label ?? "이전 버전 없음"}
-                    kind={compareBase ? compareBaseKind : null}
-                    rows={lineDiffRows}
-                  />
-                  <DiffFile
-                    side="right"
-                    title={compareTargetLabel}
-                    kind={compareTargetKind}
-                    rows={lineDiffRows}
-                  />
-                </div>
 
-                {compareTargetKind === "image" ? (
-                  <div className="asset-diff-panel">
-                    <div className="asset-diff-title">
-                      <FileImage aria-hidden="true" size={15} />
-                      결과 이미지
+                  {compareTargetKind === "image" ? (
+                    <div className="asset-diff-panel">
+                      <div className="asset-diff-title">
+                        <FileImage aria-hidden="true" size={15} />
+                        {ui.resultImage}
+                      </div>
+                      <div className="image-compare">
+                        <ImageColumn
+                          title={ui.resultImagePrevious}
+                          images={compareBaseImages}
+                          emptyLabel={ui.emptyImage}
+                        />
+                        <ImageColumn
+                          title={ui.resultImageCurrent}
+                          images={compareTargetImages}
+                          emptyLabel={ui.emptyImage}
+                        />
+                      </div>
                     </div>
-                    <div className="image-compare">
-                      <ImageColumn title="이전 결과 이미지" images={compareBaseImages} />
-                      <ImageColumn title="현재 결과 이미지" images={compareTargetImages} />
-                    </div>
-                  </div>
-                ) : null}
-              </section>
+                  ) : null}
+                </section>
               )}
             </div>
-
           </>
         ) : (
           <section className="empty-state">
             <Sparkles aria-hidden="true" size={24} />
-            <h2>주제를 선택하세요</h2>
+            <h2>{emptyStateTitle}</h2>
           </section>
         )}
       </main>
-      <Toast toast={toast} onClose={() => setToast(null)} />
+      <Toast
+        toast={toast}
+        closeLabel={ui.closeToast}
+        onClose={() => setToast(null)}
+      />
       <ConfirmModal
         dialog={confirmDialog}
         busy={confirmBusy}
+        busyLabel={ui.processing}
+        closeLabel={ui.close}
+        defaultCancelLabel={ui.cancel}
+        defaultConfirmLabel={ui.confirm}
         onCancel={closeConfirm}
         onConfirm={confirmCurrentAction}
       />
@@ -1375,10 +1938,23 @@ export function App() {
 type ImageColumnProps = {
   title: string;
   images: Array<ImageAsset | DraftImage>;
+  emptyLabel: string;
 };
 
-function KindBadge({ kind }: { kind: PromptVersionKind }) {
-  return <span className={`kind-badge ${kind}`}>{kind === "image" ? "이미지" : "텍스트"}</span>;
+function KindBadge({
+  kind,
+  imageLabel,
+  textLabel,
+}: {
+  kind: PromptVersionKind;
+  imageLabel: string;
+  textLabel: string;
+}) {
+  return (
+    <span className={`kind-badge ${kind}`}>
+      {kind === "image" ? imageLabel : textLabel}
+    </span>
+  );
 }
 
 type DiffFileProps = {
@@ -1386,25 +1962,47 @@ type DiffFileProps = {
   title: string;
   kind: PromptVersionKind | null;
   rows: LineDiffRow[];
+  emptyLabel: string;
+  imageLabel: string;
+  textLabel: string;
 };
 
-function DiffFile({ side, title, kind, rows }: DiffFileProps) {
+function DiffFile({
+  side,
+  title,
+  kind,
+  rows,
+  emptyLabel,
+  imageLabel,
+  textLabel,
+}: DiffFileProps) {
   const isLeft = side === "left";
 
   return (
     <div className="diff-file">
       <div className="diff-file-header">
         <span>{title}</span>
-        {kind ? <KindBadge kind={kind} /> : null}
+        {kind ? (
+          <KindBadge
+            kind={kind}
+            imageLabel={imageLabel}
+            textLabel={textLabel}
+          />
+        ) : null}
       </div>
       <div className="code-lines">
         {rows.length > 0 ? (
           rows.map((row) => {
             const visible =
-              row.type === "same" || (isLeft && row.type === "removed") || (!isLeft && row.type === "added");
-            const lineNumber = isLeft ? row.leftLineNumber : row.rightLineNumber;
+              row.type === "same" ||
+              (isLeft && row.type === "removed") ||
+              (!isLeft && row.type === "added");
+            const lineNumber = isLeft
+              ? row.leftLineNumber
+              : row.rightLineNumber;
             const text = isLeft ? row.leftText : row.rightText;
-            const marker = row.type === "same" || !visible ? "" : isLeft ? "-" : "+";
+            const marker =
+              row.type === "same" || !visible ? "" : isLeft ? "-" : "+";
 
             return (
               <div
@@ -1421,7 +2019,7 @@ function DiffFile({ side, title, kind, rows }: DiffFileProps) {
           <div className="code-line empty-message">
             <span className="line-number" />
             <span className="change-marker" />
-            <code>빈 내용</code>
+            <code>{emptyLabel}</code>
           </div>
         )}
       </div>
@@ -1429,7 +2027,7 @@ function DiffFile({ side, title, kind, rows }: DiffFileProps) {
   );
 }
 
-function ImageColumn({ title, images }: ImageColumnProps) {
+function ImageColumn({ title, images, emptyLabel }: ImageColumnProps) {
   return (
     <div className="image-column">
       <div className="image-column-title">
@@ -1446,7 +2044,7 @@ function ImageColumn({ title, images }: ImageColumnProps) {
           ))}
         </div>
       ) : (
-        <div className="empty-image">이미지 없음</div>
+        <div className="empty-image">{emptyLabel}</div>
       )}
     </div>
   );

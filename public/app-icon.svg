@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="깃프롬프트(Git Prompt)">
+  <rect width="64" height="64" rx="14" fill="#1e1e1e"/>
+  <path d="M14 18h36v28H14z" fill="#252526" stroke="#3c3c3c" stroke-width="2"/>
+  <path d="M20 25h18M20 32h24M20 39h14" stroke="#d4d4d4" stroke-width="3" stroke-linecap="round"/>
+  <path d="M44 11l2.4 6.6L53 20l-6.6 2.4L44 29l-2.4-6.6L35 20l6.6-2.4z" fill="#007acc"/>
+  <path d="M48 39l1.6 4.4L54 45l-4.4 1.6L48 51l-1.6-4.4L42 45l4.4-1.6z" fill="#2ea043"/>
+</svg>

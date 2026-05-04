@@ -12,11 +12,24 @@ export type ConfirmDialogState = {
 type ConfirmModalProps = {
   dialog: ConfirmDialogState | null;
   busy: boolean;
+  busyLabel: string;
+  closeLabel: string;
+  defaultCancelLabel: string;
+  defaultConfirmLabel: string;
   onCancel: () => void;
   onConfirm: () => void;
 };
 
-export function ConfirmModal({ dialog, busy, onCancel, onConfirm }: ConfirmModalProps) {
+export function ConfirmModal({
+  dialog,
+  busy,
+  busyLabel,
+  closeLabel,
+  defaultCancelLabel,
+  defaultConfirmLabel,
+  onCancel,
+  onConfirm,
+}: ConfirmModalProps) {
   useEffect(() => {
     if (!dialog || busy) {
       return;
@@ -47,17 +60,17 @@ export function ConfirmModal({ dialog, busy, onCancel, onConfirm }: ConfirmModal
       >
         <div className="confirm-modal-header">
           <h3 id="confirm-modal-title">{dialog.title}</h3>
-          <button type="button" onClick={onCancel} disabled={busy} aria-label="닫기">
+          <button type="button" onClick={onCancel} disabled={busy} aria-label={closeLabel}>
             <X aria-hidden="true" size={15} />
           </button>
         </div>
         <p>{dialog.message}</p>
         <div className="confirm-modal-actions">
           <button type="button" className="secondary-button" onClick={onCancel} disabled={busy}>
-            {dialog.cancelLabel ?? "취소"}
+            {dialog.cancelLabel ?? defaultCancelLabel}
           </button>
           <button type="button" className="danger-button" onClick={onConfirm} disabled={busy}>
-            {busy ? "처리 중" : dialog.confirmLabel ?? "확인"}
+            {busy ? busyLabel : dialog.confirmLabel ?? defaultConfirmLabel}
           </button>
         </div>
       </section>
