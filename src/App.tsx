@@ -13,6 +13,8 @@ import {
   FileImage,
   FileText,
   FolderPlus,
+  GitBranch,
+  GitCommitHorizontal,
   ImageIcon,
   ImagePlus,
   Layers3,
@@ -1092,41 +1094,98 @@ export function App() {
             </div>
 
             <section className="history-panel">
-              <div className="panel-heading">
-                <h3>저장 기록</h3>
-                <span>{topicVersions.length}개</span>
+              <div className="history-header">
+                <div>
+                  <h3>
+                    <GitBranch aria-hidden="true" size={15} />
+                    {selectedTopic.title}
+                  </h3>
+                  <span>{topicVersions.length} commits</span>
+                </div>
+                {hasDraftChanges ? <span className="working-tree-badge">working tree</span> : null}
               </div>
-              <div className="version-list">
-                {topicVersions.map((version) => (
-                  <article
-                    key={version.id}
-                    className={`version-card ${version.id === activeVersionId ? "active" : ""}`}
-                  >
-                    <button
-                      type="button"
-                      className="version-main"
-                      onClick={() => setActiveVersionId(version.id)}
-                    >
-                      <strong>
-                        {version.label}
-                        <KindBadge kind={getVersionKind(version)} />
-                      </strong>
-                      <span>
-                        <Clock3 aria-hidden="true" size={14} />
-                        {formatDateTime(version.createdAt)}
-                      </span>
-                      <p>{getVersionKind(version) === "text" ? getVersionResultText(version) : version.body}</p>
-                    </button>
-                    <div className="version-actions">
-                      <button type="button" onClick={() => continueFromVersion(version)}>
-                        이어쓰기
-                      </button>
-                      <button type="button" onClick={() => handleVersionDelete(version.id)}>
-                        삭제
-                      </button>
+              <div className="commit-graph" aria-label="저장 기록">
+                {activeVersionId === "draft" && hasDraftChanges ? (
+                  <article className="commit-row draft active">
+                    <div className="commit-rail">
+                      <span className="commit-line top-hidden" />
+                      <span className="commit-dot draft-dot" />
+                      <span className="commit-line" />
+                    </div>
+                    <div className="commit-content">
+                      <div className="commit-title-row">
+                        <button type="button" className="commit-title" onClick={() => setActiveVersionId("draft")}>
+                          작성 중
+                        </button>
+                        <span className="head-badge">HEAD</span>
+                      </div>
+                      <p>{selectedTopicKind === "text" ? draftResultText || draftBody : draftBody}</p>
                     </div>
                   </article>
-                ))}
+                ) : null}
+                {[...topicVersions].reverse().map((version, index, reversedVersions) => {
+                  const isActive = version.id === activeVersionId;
+                  const preview =
+                    selectedTopicKind === "text" ? getVersionResultText(version) : version.body;
+                  const shortHash = version.id.replace(/-/g, "").slice(0, 7);
+
+                  return (
+                    <article
+                      key={version.id}
+                      className={`commit-row ${isActive ? "active" : ""}`}
+                    >
+                      <div className="commit-rail">
+                        <span
+                          className={`commit-line ${
+                            index === 0 && !(activeVersionId === "draft" && hasDraftChanges)
+                              ? "top-hidden"
+                              : ""
+                          }`}
+                        />
+                        <span className="commit-dot">
+                          <GitCommitHorizontal aria-hidden="true" size={13} />
+                        </span>
+                        <span
+                          className={`commit-line ${
+                            index === reversedVersions.length - 1 ? "bottom-hidden" : ""
+                          }`}
+                        />
+                      </div>
+                      <div className="commit-content">
+                        <div className="commit-title-row">
+                          <button
+                            type="button"
+                            className="commit-title"
+                            onClick={() => setActiveVersionId(version.id)}
+                          >
+                            {version.label}
+                          </button>
+                          {isActive ? <span className="head-badge">HEAD</span> : null}
+                          <KindBadge kind={selectedTopicKind} />
+                        </div>
+                        <div className="commit-meta">
+                          <span>{shortHash}</span>
+                          <span>
+                            <Clock3 aria-hidden="true" size={13} />
+                            {formatDateTime(version.createdAt)}
+                          </span>
+                        </div>
+                        <p>{preview}</p>
+                        <div className="commit-actions">
+                          <button type="button" onClick={() => continueFromVersion(version)}>
+                            checkout
+                          </button>
+                          <button type="button" onClick={() => handleVersionDelete(version.id)}>
+                            delete
+                          </button>
+                        </div>
+                      </div>
+                    </article>
+                  );
+                })}
+                {topicVersions.length === 0 ? (
+                  <div className="empty-commit-log">아직 저장된 커밋이 없습니다.</div>
+                ) : null}
               </div>
             </section>
           </>
