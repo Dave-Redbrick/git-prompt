@@ -148,6 +148,7 @@ export const seedIfEmpty = async () => {
     projectId,
     themeId,
     kind: "text",
+    modelIds: ["xai/grok-4-1-fast-non-reasoning", "openai/text-embedding-3-small"],
     title: "신규 랜딩 히어로 카피",
     brief: "원본 의도는 유지하면서 구체성, 제약, 결과 형식을 더 분명하게 만든다.",
     createdAt,

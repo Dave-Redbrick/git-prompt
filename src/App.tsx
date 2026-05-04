@@ -2,16 +2,16 @@ import {
   ChangeEvent,
   ClipboardEvent as ReactClipboardEvent,
   FormEvent,
-  KeyboardEvent as ReactKeyboardEvent,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
+  ChartNoAxesColumnIncreasing,
   ChevronDown,
-  CircleDot,
-  ClipboardPaste,
   Diff,
+  Download,
   FileImage,
   FileText,
   Folder,
@@ -19,7 +19,6 @@ import {
   FolderPlus,
   GitBranch,
   ImageIcon,
-  ImagePlus,
   Moon,
   PanelLeft,
   Plus,
@@ -27,13 +26,20 @@ import {
   Sparkles,
   Sun,
   Trash2,
+  Upload,
   X,
 } from "lucide-react";
 import {
   ConfirmModal,
   type ConfirmDialogState,
 } from "./components/ConfirmModal";
+import { CostTrendPanel } from "./components/CostTrendPanel";
+import { DiffPanel } from "./components/DiffPanel";
+import { HistoryGraph } from "./components/HistoryGraph";
 import { Toast, type ToastState, type ToastVariant } from "./components/Toast";
+import { TagPopoverSelect } from "./components/TagPopoverSelect";
+import { TreeRow } from "./components/TreeRow";
+import { WritePanel } from "./components/WritePanel";
 import {
   createId,
   deleteItem,
@@ -42,7 +48,31 @@ import {
   putItem,
   seedIfEmpty,
 } from "./lib/db";
-import { diffLines, type LineDiffRow } from "./lib/diff";
+import {
+  buildVersionCostMetrics,
+  createCostSnapshot,
+  defaultModelIdsByKind,
+  estimateDraftCostMetrics,
+  formatCurrency,
+  getAvailableModelConfigs,
+  getModelDisplayName,
+  getModelOptions,
+  resolveTopicModelIds,
+} from "./lib/costEstimator";
+import { diffLines } from "./lib/diff";
+import { useUsdKrwExchangeRate } from "./lib/exchangeRate";
+import {
+  copyImagesToDraft,
+  draftImagesMatchStoredImages,
+  getTopicKind,
+  getVersionKind,
+  getVersionResultText,
+} from "./lib/promptVersions";
+import {
+  createProjectArchiveZip,
+  downloadBlob,
+  importProjectArchiveZip,
+} from "./lib/projectArchive";
 import { localeKey, messages, readLocale, type Locale } from "./i18n";
 import type {
   DraftImage,
@@ -51,11 +81,15 @@ import type {
   PromptVersion,
   PromptVersionKind,
   Theme,
+  TopicModelConfig,
+  TopicModelId,
   Topic,
 } from "./types";
 
 const selectionKey = "prompt-reinforcer-selection";
+const folderStateKey = "prompt-reinforcer-folder-state";
 const appearanceKey = "prompt-reinforcer-appearance";
+const customModelsKey = "prompt-reinforcer-custom-models";
 const themeColors = [
   "#EF4444",
   "#F97316",
@@ -72,7 +106,13 @@ type Selection = {
   topicId: string;
 };
 
+type FolderState = {
+  projectThemeIds: Record<string, string>;
+  themeTopicIds: Record<string, string>;
+};
+
 type AppearanceTheme = "light" | "dark";
+type SidebarView = "explorer" | "history" | "models";
 type RenameTarget = {
   kind: "project" | "theme" | "topic";
   id: string;
@@ -103,11 +143,89 @@ const readSelection = (): Selection => {
   }
 };
 
+const readFolderState = (): FolderState => {
+  try {
+    const parsed = JSON.parse(
+      localStorage.getItem(folderStateKey) ?? "{}",
+    ) as Partial<FolderState>;
+
+    return {
+      projectThemeIds: parsed.projectThemeIds ?? {},
+      themeTopicIds: parsed.themeTopicIds ?? {},
+    };
+  } catch {
+    return { projectThemeIds: {}, themeTopicIds: {} };
+  }
+};
+
 const readAppearanceTheme = (): AppearanceTheme => {
   try {
     return localStorage.getItem(appearanceKey) === "dark" ? "dark" : "light";
   } catch {
     return "light";
+  }
+};
+
+const isPromptVersionKind = (value: unknown): value is PromptVersionKind =>
+  value === "text" || value === "image";
+
+const isTopicModelConfig = (value: unknown): value is TopicModelConfig => {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const model = value as Partial<TopicModelConfig>;
+  const hasInputPrice =
+    model.pricingType === "input" &&
+    typeof model.inputUsdPerMillion === "number" &&
+    Number.isFinite(model.inputUsdPerMillion) &&
+    model.inputUsdPerMillion >= 0;
+  const hasImagePrice =
+    model.pricingType === "image" &&
+    typeof model.costPerImageUsd === "number" &&
+    Number.isFinite(model.costPerImageUsd) &&
+    model.costPerImageUsd >= 0;
+
+  return (
+    typeof model.id === "string" &&
+    model.id.trim().length > 0 &&
+    typeof model.provider === "string" &&
+    model.provider.trim().length > 0 &&
+    isPromptVersionKind(model.kind) &&
+    (model.role === "chat-input" ||
+      model.role === "embedding" ||
+      model.role === "prompt-refiner" ||
+      model.role === "image-generation") &&
+    (hasInputPrice || hasImagePrice)
+  );
+};
+
+const normalizeCustomModels = (models: TopicModelConfig[]) => {
+  const modelMap = new Map<string, TopicModelConfig>();
+
+  models.forEach((model) => {
+    modelMap.set(`${model.kind}:${model.id}`, {
+      ...model,
+      id: model.id.trim(),
+      provider: model.provider.trim(),
+    });
+  });
+
+  return Array.from(modelMap.values());
+};
+
+const readCustomModels = (): TopicModelConfig[] => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(customModelsKey) ?? "[]") as unknown;
+    const models = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray((parsed as { models?: unknown }).models)
+        ? (parsed as { models: unknown[] }).models
+        : [];
+
+    return normalizeCustomModels(models.filter(isTopicModelConfig));
+  } catch {
+    return [];
   }
 };
 
@@ -148,55 +266,12 @@ const getCurrentClipboardImageFiles = (clipboardData: DataTransfer) => {
     .filter((file): file is File => Boolean(file));
 };
 
-const getVersionKind = (version?: PromptVersion | null): PromptVersionKind =>
-  version?.kind ?? "text";
-
-const getTopicKind = (
-  topic?: Topic | null,
-  latestVersion?: PromptVersion | null,
-): PromptVersionKind => topic?.kind ?? getVersionKind(latestVersion);
-
-const getVersionResultText = (version?: PromptVersion | null) => {
-  if (!version || getVersionKind(version) !== "text") {
-    return "";
-  }
-
-  return version.resultText ?? version.body;
-};
-
-const getCommitMemo = (notes: string | undefined, fallback: string) =>
-  notes?.trim() || fallback;
-
-const copyImagesToDraft = (images: ImageAsset[]): DraftImage[] =>
-  images.map((image) => ({
-    id: createId(),
-    sourceId: image.id,
-    name: image.name,
-    type: image.type,
-    dataUrl: image.dataUrl,
-  }));
-
-const draftImagesMatchStoredImages = (
-  draftImages: DraftImage[],
-  storedImages: ImageAsset[],
-) => {
-  if (draftImages.length !== storedImages.length) {
-    return false;
-  }
-
-  return storedImages.every((storedImage, index) => {
-    const draftImage = draftImages[index];
-    return (
-      draftImage?.sourceId === storedImage.id ||
-      (draftImage?.name === storedImage.name &&
-        draftImage?.type === storedImage.type &&
-        draftImage?.dataUrl === storedImage.dataUrl)
-    );
-  });
-};
-
 export function App() {
   const savedSelection = useMemo(readSelection, []);
+  const projectImportInputRef = useRef<HTMLInputElement>(null);
+  const customModelImportInputRef = useRef<HTMLInputElement>(null);
+  const [folderState, setFolderState] =
+    useState<FolderState>(readFolderState);
   const [appearanceTheme, setAppearanceTheme] =
     useState<AppearanceTheme>(readAppearanceTheme);
   const [locale, setLocale] = useState<Locale>(readLocale);
@@ -217,14 +292,17 @@ export function App() {
     null,
   );
   const [confirmBusy, setConfirmBusy] = useState(false);
-  const [sidebarView, setSidebarView] = useState<"explorer" | "history">(
-    "explorer",
-  );
-  const [mainView, setMainView] = useState<"write" | "diff">("write");
+  const [sidebarView, setSidebarView] = useState<SidebarView>("explorer");
+  const [mainView, setMainView] = useState<"write" | "diff" | "cost">("write");
   const [createPanel, setCreatePanel] = useState<
     "project" | "theme" | "topic" | null
   >(null);
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
+  const [customModels, setCustomModels] =
+    useState<TopicModelConfig[]>(readCustomModels);
+  const [showCustomModelForm, setShowCustomModelForm] = useState(false);
+  const [customModelKind, setCustomModelKind] =
+    useState<PromptVersionKind>("text");
 
   const [newProjectName, setNewProjectName] = useState("");
   const [newThemeName, setNewThemeName] = useState("");
@@ -232,6 +310,15 @@ export function App() {
   const [newTopicTitle, setNewTopicTitle] = useState("");
   const [newTopicBrief, setNewTopicBrief] = useState("");
   const [newTopicKind, setNewTopicKind] = useState<PromptVersionKind>("text");
+  const [newTopicModelIds, setNewTopicModelIds] = useState<TopicModelId[]>(
+    defaultModelIdsByKind.text,
+  );
+  const [customModelProvider, setCustomModelProvider] = useState("xAI");
+  const [customModelId, setCustomModelId] = useState("");
+  const [customModelPricingType, setCustomModelPricingType] = useState<
+    "input" | "image"
+  >("input");
+  const [customModelPrice, setCustomModelPrice] = useState("");
 
   const [draftKind, setDraftKind] = useState<PromptVersionKind>("text");
   const [draftLabel, setDraftLabel] = useState("");
@@ -241,6 +328,7 @@ export function App() {
   const [draftImages, setDraftImages] = useState<DraftImage[]>([]);
   const [pasteTargetActive, setPasteTargetActive] = useState(false);
   const ui = messages[locale];
+  const usdKrwExchangeRate = useUsdKrwExchangeRate(locale === "ko");
 
   const showToast = (message: string, variant: ToastVariant = "success") => {
     setToast({ id: Date.now(), message, variant });
@@ -346,6 +434,14 @@ export function App() {
     document.title = ui.appName;
   }, [locale]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(customModelsKey, JSON.stringify(customModels));
+    } catch {
+      // Ignore storage failures; in-memory custom models still work for the session.
+    }
+  }, [customModels]);
+
   const selectedProject = store.projects.find(
     (project) => project.id === selectedProjectId,
   );
@@ -376,6 +472,58 @@ export function App() {
     }, {});
   }, [store.images]);
 
+  const selectedTopicModelIds = useMemo(
+    () =>
+      resolveTopicModelIds(
+        selectedTopicKind,
+        selectedTopic?.modelIds,
+        customModels,
+      ),
+    [customModels, selectedTopic?.modelIds, selectedTopicKind],
+  );
+
+  const metricsByVersion = useMemo(
+    () =>
+      buildVersionCostMetrics(
+        topicVersions,
+        imagesByVersion,
+        selectedTopicKind,
+        selectedTopicModelIds,
+        customModels,
+      ),
+    [
+      topicVersions,
+      imagesByVersion,
+      selectedTopicKind,
+      selectedTopicModelIds,
+      customModels,
+    ],
+  );
+
+  const currentDraftCostMetrics = useMemo(
+    () =>
+      estimateDraftCostMetrics({
+        body: draftBody,
+        imageCount: selectedTopicKind === "image" ? draftImages.length : 0,
+        imagesByVersion,
+        kind: selectedTopicKind,
+        modelConfigs: customModels,
+        modelIds: selectedTopicModelIds,
+        previousVersion: latestVersion,
+        resultText: draftResultText,
+      }),
+    [
+      draftBody,
+      draftImages.length,
+      draftResultText,
+      imagesByVersion,
+      latestVersion,
+      customModels,
+      selectedTopicKind,
+      selectedTopicModelIds,
+    ],
+  );
+
   const themeCountByProject = useMemo(() => {
     return store.themes.reduce<Record<string, number>>((acc, theme) => {
       acc[theme.projectId] = (acc[theme.projectId] ?? 0) + 1;
@@ -391,6 +539,51 @@ export function App() {
       return acc;
     }, {});
   }, [store.topics]);
+
+  const getOpenTopicIdForTheme = (
+    projectId: string,
+    themeId: string,
+    source: Pick<StoreState, "topics"> = store,
+  ) => {
+    const topics = source.topics.filter(
+      (topic) => topic.projectId === projectId && topic.themeId === themeId,
+    );
+    const savedTopicId = folderState.themeTopicIds[themeId];
+    return topics.find((topic) => topic.id === savedTopicId)?.id ?? topics[0]?.id ?? "";
+  };
+
+  const getOpenPathForProject = (
+    projectId: string,
+    source: Pick<StoreState, "themes" | "topics"> = store,
+  ): Pick<Selection, "themeId" | "topicId"> => {
+    const themes = source.themes.filter((theme) => theme.projectId === projectId);
+    const savedThemeId = folderState.projectThemeIds[projectId];
+    const theme =
+      themes.find((item) => item.id === savedThemeId) ?? themes[0] ?? null;
+
+    if (!theme) {
+      return { themeId: "", topicId: "" };
+    }
+
+    return {
+      themeId: theme.id,
+      topicId: getOpenTopicIdForTheme(projectId, theme.id, source),
+    };
+  };
+
+  const openProjectPath = (projectId: string) => {
+    const { themeId, topicId } = getOpenPathForProject(projectId);
+    setSelectedProjectId(projectId);
+    setSelectedThemeId(themeId);
+    setSelectedTopicId(topicId);
+    setCreatePanel(null);
+  };
+
+  const openThemePath = (themeId: string) => {
+    setSelectedThemeId(themeId);
+    setSelectedTopicId(getOpenTopicIdForTheme(selectedProjectId, themeId));
+    setCreatePanel(null);
+  };
 
   useEffect(() => {
     if (loading) {
@@ -422,11 +615,25 @@ export function App() {
       return;
     }
 
-    if (selectedThemeId && !selectedTheme) {
-      setSelectedThemeId("");
-      setSelectedTopicId("");
+    if (!selectedThemeId || !selectedTheme) {
+      const { themeId, topicId } = getOpenPathForProject(selectedProjectId);
+      if (selectedThemeId !== themeId) {
+        setSelectedThemeId(themeId);
+      }
+      if (selectedTopicId !== topicId) {
+        setSelectedTopicId(topicId);
+      }
     }
-  }, [loading, selectedProjectId, selectedTheme, selectedThemeId]);
+  }, [
+    folderState,
+    loading,
+    selectedProjectId,
+    selectedTheme,
+    selectedThemeId,
+    selectedTopicId,
+    store.themes,
+    store.topics,
+  ]);
 
   useEffect(() => {
     if (loading) {
@@ -438,10 +645,21 @@ export function App() {
       return;
     }
 
-    if (selectedTopicId && !selectedTopic) {
-      setSelectedTopicId("");
+    if (!selectedTopicId || !selectedTopic) {
+      const topicId = getOpenTopicIdForTheme(selectedProjectId, selectedThemeId);
+      if (selectedTopicId !== topicId) {
+        setSelectedTopicId(topicId);
+      }
     }
-  }, [loading, selectedThemeId, selectedTopic, selectedTopicId]);
+  }, [
+    folderState,
+    loading,
+    selectedProjectId,
+    selectedThemeId,
+    selectedTopic,
+    selectedTopicId,
+    store.topics,
+  ]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -453,6 +671,46 @@ export function App() {
       }),
     );
   }, [selectedProjectId, selectedThemeId, selectedTopicId]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(folderStateKey, JSON.stringify(folderState));
+    } catch {
+      // Ignore storage failures so folder state still works for the session.
+    }
+  }, [folderState]);
+
+  useEffect(() => {
+    if (loading || !selectedProjectId) {
+      return;
+    }
+
+    setFolderState((current) => {
+      const projectThemeIds = { ...current.projectThemeIds };
+      const themeTopicIds = { ...current.themeTopicIds };
+
+      if (selectedThemeId) {
+        projectThemeIds[selectedProjectId] = selectedThemeId;
+      }
+
+      if (selectedThemeId && selectedTopicId) {
+        themeTopicIds[selectedThemeId] = selectedTopicId;
+      }
+
+      const projectThemeUnchanged =
+        current.projectThemeIds[selectedProjectId] ===
+        projectThemeIds[selectedProjectId];
+      const themeTopicUnchanged =
+        !selectedThemeId ||
+        current.themeTopicIds[selectedThemeId] === themeTopicIds[selectedThemeId];
+
+      if (projectThemeUnchanged && themeTopicUnchanged) {
+        return current;
+      }
+
+      return { projectThemeIds, themeTopicIds };
+    });
+  }, [loading, selectedProjectId, selectedThemeId, selectedTopicId]);
 
   useEffect(() => {
     if (loading) {
@@ -503,7 +761,6 @@ export function App() {
       : activeVersionId === "draft"
         ? latestVersion
         : null;
-  const compareBaseKind = selectedTopicKind;
   const compareTargetKind = selectedTopicKind;
   const compareBaseText =
     compareTargetKind === "text"
@@ -541,13 +798,17 @@ export function App() {
     selectedTopicKind === "text" ? getVersionResultText(latestVersion) : "";
   const draftComparableResultText =
     selectedTopicKind === "text" ? draftResultText : "";
+  const hasDraftModelChanges =
+    currentDraftCostMetrics.modelAddedIds.length > 0 ||
+    currentDraftCostMetrics.modelRemovedIds.length > 0;
   const hasDraftChanges =
     (latestVersion?.body ?? "") !== draftBody ||
     latestComparableResultText !== draftComparableResultText ||
     !draftImagesMatchStoredImages(
       comparableDraftImages,
       comparableLatestImages,
-    );
+    ) ||
+    hasDraftModelChanges;
   const canSaveDraft =
     hasDraftChanges &&
     draftBody.trim().length > 0 &&
@@ -587,6 +848,56 @@ export function App() {
     setCreatePanel(null);
     showToast(ui.projectSaved);
     await refresh();
+  };
+
+  const handleProjectExport = async () => {
+    if (!selectedProject) {
+      showToast(ui.selectProject, "error");
+      return;
+    }
+
+    try {
+      const { blob, fileName } = await createProjectArchiveZip(
+        selectedProject.id,
+        store,
+      );
+      downloadBlob(blob, fileName);
+      showToast(ui.projectExported);
+    } catch (archiveError) {
+      showToast(
+        archiveError instanceof Error ? archiveError.message : ui.actionFailed,
+        "error",
+      );
+    }
+  };
+
+  const handleProjectImport = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    try {
+      const imported = await importProjectArchiveZip(file);
+      const { themeId, topicId } = getOpenPathForProject(imported.project.id, {
+        themes: imported.themes,
+        topics: imported.topics,
+      });
+      setSelectedProjectId(imported.project.id);
+      setSelectedThemeId(themeId);
+      setSelectedTopicId(topicId);
+      setCreatePanel(null);
+      setSidebarView("explorer");
+      showToast(ui.projectImported(imported.project.name));
+      await refresh();
+    } catch (archiveError) {
+      showToast(
+        archiveError instanceof Error ? archiveError.message : ui.actionFailed,
+        "error",
+      );
+    } finally {
+      event.target.value = "";
+    }
   };
 
   const startRename = (target: RenameTarget) => {
@@ -655,21 +966,6 @@ export function App() {
         renameError instanceof Error ? renameError.message : ui.actionFailed,
         "error",
       );
-    }
-  };
-
-  const handleRenameKeyDown = (
-    event: ReactKeyboardEvent<HTMLInputElement>,
-  ) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      void commitRename();
-      return;
-    }
-
-    if (event.key === "Escape") {
-      event.preventDefault();
-      cancelRename();
     }
   };
 
@@ -761,6 +1057,7 @@ export function App() {
       projectId: selectedProjectId,
       themeId: selectedThemeId,
       kind: newTopicKind,
+      modelIds: newTopicModelIds,
       title,
       brief: newTopicBrief.trim(),
       createdAt,
@@ -769,10 +1066,160 @@ export function App() {
     setNewTopicTitle("");
     setNewTopicBrief("");
     setNewTopicKind("text");
+    setNewTopicModelIds(defaultModelIdsByKind.text);
     setSelectedTopicId(id);
     setCreatePanel(null);
     showToast(ui.topicSaved);
     await refresh();
+  };
+
+  const updateSelectedTopicModels = async (modelIds: string[]) => {
+    if (!selectedTopic) {
+      return;
+    }
+
+    const updatedAt = nowIso();
+    const nextTopic = {
+      ...selectedTopic,
+      modelIds: modelIds as TopicModelId[],
+      updatedAt,
+    };
+
+    setStore((current) => ({
+      ...current,
+      topics: current.topics.map((topic) =>
+        topic.id === selectedTopic.id ? nextTopic : topic,
+      ),
+    }));
+    setActiveVersionId("draft");
+    await putItem("topics", nextTopic);
+    await refresh();
+  };
+
+  const handleCustomModelAdd = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const provider = customModelProvider.trim();
+    const id = customModelId.trim();
+    if (!provider || !id) {
+      showToast(ui.modelRequired, "error");
+      return;
+    }
+
+    const price = Number(customModelPrice);
+    if (!Number.isFinite(price) || price < 0) {
+      showToast(ui.modelPriceInvalid, "error");
+      return;
+    }
+
+    const pricingType =
+      customModelKind === "text" ? "input" : customModelPricingType;
+    const model: TopicModelConfig = {
+      id,
+      provider,
+      kind: customModelKind,
+      role:
+        pricingType === "image"
+          ? "image-generation"
+          : customModelKind === "image"
+            ? "prompt-refiner"
+            : id.toLowerCase().includes("embedding")
+              ? "embedding"
+              : "chat-input",
+      pricingType,
+      ...(pricingType === "image"
+        ? { costPerImageUsd: price }
+        : { inputUsdPerMillion: price }),
+    };
+
+    setCustomModels((current) =>
+      normalizeCustomModels([
+        ...current.filter(
+          (item) => !(item.kind === customModelKind && item.id === id),
+        ),
+        model,
+      ]),
+    );
+    setCustomModelId("");
+    setCustomModelPrice("");
+    setShowCustomModelForm(false);
+    showToast(ui.modelSaved);
+  };
+
+  const handleCustomModelDelete = (model: TopicModelConfig) => {
+    setCustomModels((current) =>
+      current.filter(
+        (item) => !(item.kind === model.kind && item.id === model.id),
+      ),
+    );
+    showToast(ui.modelDeleted);
+  };
+
+  const handleCustomModelsExport = () => {
+    const blob = new Blob(
+      [
+        JSON.stringify(
+          {
+            app: "Git Prompt",
+            schema: "git-prompt.custom-models",
+            version: 1,
+            exportedAt: nowIso(),
+            models: customModels,
+          },
+          null,
+          2,
+        ),
+      ],
+      { type: "application/json" },
+    );
+
+    downloadBlob(blob, "git-prompt-models.json");
+    showToast(ui.modelsExported);
+  };
+
+  const handleCustomModelsImport = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(await file.text()) as unknown;
+      const incoming = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray((parsed as { models?: unknown }).models)
+          ? (parsed as { models: unknown[] }).models
+          : [];
+      const incomingModels = normalizeCustomModels(
+        incoming.filter(isTopicModelConfig),
+      );
+
+      if (incomingModels.length === 0) {
+        showToast(ui.noModelOptions, "error");
+        return;
+      }
+
+      setCustomModels((current) =>
+        normalizeCustomModels([
+          ...current.filter(
+            (currentModel) =>
+              !incomingModels.some(
+                (incomingModel) =>
+                  incomingModel.kind === currentModel.kind &&
+                  incomingModel.id === currentModel.id,
+              ),
+          ),
+          ...incomingModels,
+        ]),
+      );
+      showToast(ui.modelsImported(incomingModels.length));
+    } catch (importError) {
+      showToast(
+        importError instanceof Error ? importError.message : ui.actionFailed,
+        "error",
+      );
+    } finally {
+      event.target.value = "";
+    }
   };
 
   const handleThemeDelete = (theme: Theme) => {
@@ -907,12 +1354,24 @@ export function App() {
       return;
     }
 
+    const snapshotMetrics = estimateDraftCostMetrics({
+      body,
+      imageCount: selectedTopicKind === "image" ? draftImages.length : 0,
+      imagesByVersion,
+      kind: selectedTopicKind,
+      modelConfigs: customModels,
+      modelIds: selectedTopicModelIds,
+      previousVersion: latestVersion,
+      resultText,
+    });
     const createdAt = nowIso();
     const versionId = createId();
     await putItem("versions", {
       id: versionId,
       topicId: selectedTopic.id,
       kind: selectedTopicKind,
+      modelIds: selectedTopicModelIds,
+      costSnapshot: createCostSnapshot(snapshotMetrics),
       label: draftLabel.trim() || `v${topicVersions.length + 1}`,
       body,
       resultText: selectedTopicKind === "text" ? resultText : "",
@@ -939,6 +1398,7 @@ export function App() {
     await putItem("topics", {
       ...selectedTopic,
       kind: selectedTopicKind,
+      modelIds: selectedTopicModelIds,
       updatedAt: createdAt,
     });
 
@@ -1014,6 +1474,9 @@ export function App() {
         ? copyImagesToDraft(imagesByVersion[version.id] ?? [])
         : [],
     );
+    if (version.modelIds?.length) {
+      void updateSelectedTopicModels(version.modelIds);
+    }
     setActiveVersionId("draft");
     setMainView("write");
   };
@@ -1028,6 +1491,9 @@ export function App() {
         ? copyImagesToDraft(imagesByVersion[version.id] ?? [])
         : [],
     );
+    if (version.modelIds?.length) {
+      void updateSelectedTopicModels(version.modelIds);
+    }
     setActiveVersionId("draft");
     setMainView("write");
     showToast(ui.cherryPickApplied(version.label));
@@ -1049,126 +1515,265 @@ export function App() {
       ? ui.selectTheme
       : ui.selectTopic;
 
-  const historySidebar = selectedTopic ? (
-    <section className="sidebar-history">
-      <div className="graph-header">
-        <div className="graph-title">
-          <ChevronDown aria-hidden="true" size={13} />
-          <span>GRAPH</span>
-        </div>
-      </div>
-      <div className="git-graph" aria-label="Graph">
-        {activeVersionId === "draft" && hasDraftChanges ? (
-          <article className="graph-row draft active">
-            <div className="graph-rail">
-              <span className="graph-node open" />
-              <span className="graph-line" />
-            </div>
-            <div className="graph-content">
-              <div className="graph-line-row">
-                <button
-                  type="button"
-                  className="graph-message"
-                  onClick={() => {
-                    setActiveVersionId("draft");
-                    setMainView("diff");
-                  }}
-                >
-                  {ui.draftMessage}
-                </button>
-                <span className="branch-pill">
-                  <CircleDot aria-hidden="true" size={14} />
-                  {ui.currentVersion}
-                </span>
-              </div>
-              <div className="graph-subline">
-                {draftNotes.trim() || ui.draftUnsavedChanges}
-              </div>
-            </div>
-          </article>
-        ) : null}
-        {[...topicVersions]
-          .reverse()
-          .map((version, index, reversedVersions) => {
-            const isActive = version.id === activeVersionId;
-            const isLatest =
-              index === 0 && !(activeVersionId === "draft" && hasDraftChanges);
+  const selectedTopicModelOptions = selectedTopic
+    ? getModelOptions(selectedTopicKind, customModels).map((option) => ({
+        description: ui.modelRole(option.role),
+        displayLabel: getModelDisplayName(option.id),
+        group: option.provider,
+        id: option.id,
+        label: option.label,
+      }))
+    : [];
+  const effectiveCustomModelPricingType =
+    customModelKind === "text" ? "input" : customModelPricingType;
+  const customModelKeySet = new Set(
+    customModels.map((model) => `${model.kind}:${model.id}`),
+  );
+  const builtInLibraryModels = [
+    ...getAvailableModelConfigs("text"),
+    ...getAvailableModelConfigs("image"),
+  ];
+  const modelLibraryItems: Array<{
+    model: TopicModelConfig;
+    source: "builtin" | "custom";
+  }> = [
+    ...builtInLibraryModels
+      .filter((model) => !customModelKeySet.has(`${model.kind}:${model.id}`))
+      .map((model) => ({ model, source: "builtin" as const })),
+    ...customModels.map((model) => ({ model, source: "custom" as const })),
+  ];
+  const modelLibraryGroups: Array<{
+    provider: string;
+    items: typeof modelLibraryItems;
+  }> = [];
+  modelLibraryItems.forEach((item) => {
+    const group = modelLibraryGroups.find(
+      (groupItem) => groupItem.provider === item.model.provider,
+    );
+    if (group) {
+      group.items.push(item);
+      return;
+    }
+    modelLibraryGroups.push({ provider: item.model.provider, items: [item] });
+  });
+  const modelUnitPrice = (model: TopicModelConfig) =>
+    model.pricingType === "image"
+      ? ui.imageRate(
+          formatCurrency(
+            model.costPerImageUsd ?? 0,
+            locale,
+            usdKrwExchangeRate?.rate ?? null,
+          ),
+        )
+      : ui.modelRate(
+          formatCurrency(
+            model.inputUsdPerMillion ?? 0,
+            locale,
+            usdKrwExchangeRate?.rate ?? null,
+          ),
+        );
 
-            return (
-              <article
-                key={version.id}
-                className={`graph-row ${isActive ? "active" : ""}`}
+  const historySidebar = (
+    <div className="history-pane">
+      <HistoryGraph
+        activeVersionId={activeVersionId}
+        draftNotes={draftNotes}
+        hasDraftChanges={hasDraftChanges}
+        selectedTopic={selectedTopic ?? null}
+        topicVersions={topicVersions}
+        locale={locale}
+        metricsByVersion={metricsByVersion}
+        ui={ui}
+        usdKrwRate={usdKrwExchangeRate?.rate ?? null}
+        onCheckout={continueFromVersion}
+        onCherryPick={cherryPickVersion}
+        onDelete={handleVersionDelete}
+        onOpenDraftDiff={() => {
+          setActiveVersionId("draft");
+          setMainView("diff");
+        }}
+        onOpenVersionDiff={(versionId) => {
+          setActiveVersionId(versionId);
+          setMainView("diff");
+        }}
+      />
+    </div>
+  );
+
+  const modelsSidebar = (
+    <div className="models-pane">
+      <section className="models-toolbar">
+        <button
+          type="button"
+          className="model-add-button"
+          onClick={() => setShowCustomModelForm((current) => !current)}
+          aria-label={ui.addModel}
+          title={ui.addModel}
+        >
+          <Plus aria-hidden="true" size={13} />
+          <span>{ui.addModel}</span>
+        </button>
+        <div className="models-toolbar-actions">
+          <button
+            type="button"
+            className="mini-icon-button"
+            onClick={handleCustomModelsExport}
+            disabled={customModels.length === 0}
+            aria-label={ui.modelExportTitle}
+            title={ui.modelExportTitle}
+          >
+            <Download aria-hidden="true" size={13} />
+          </button>
+          <button
+            type="button"
+            className="mini-icon-button"
+            onClick={() => customModelImportInputRef.current?.click()}
+            aria-label={ui.modelImportTitle}
+            title={ui.modelImportTitle}
+          >
+            <Upload aria-hidden="true" size={13} />
+          </button>
+          <input
+            ref={customModelImportInputRef}
+            className="visually-hidden"
+            type="file"
+            accept=".json,application/json"
+            onChange={handleCustomModelsImport}
+          />
+        </div>
+      </section>
+
+      {showCustomModelForm ? (
+        <form
+          className="custom-model-form model-library-form"
+          onSubmit={handleCustomModelAdd}
+        >
+          <div
+            className="result-type-control compact-kind-control model-kind-toggle"
+            aria-label={ui.modelKind}
+          >
+            <button
+              type="button"
+              className={`segment-button ${customModelKind === "text" ? "active" : ""}`}
+              onClick={() => {
+                setCustomModelKind("text");
+                setCustomModelPricingType("input");
+              }}
+            >
+              <FileText aria-hidden="true" size={14} />
+              {ui.text}
+            </button>
+            <button
+              type="button"
+              className={`segment-button ${customModelKind === "image" ? "active" : ""}`}
+              onClick={() => setCustomModelKind("image")}
+            >
+              <ImageIcon aria-hidden="true" size={14} />
+              {ui.image}
+            </button>
+          </div>
+          <div className="custom-model-fields">
+            <input
+              value={customModelProvider}
+              onChange={(event) => setCustomModelProvider(event.target.value)}
+              placeholder={ui.modelProviderPlaceholder}
+            />
+            <input
+              value={customModelId}
+              onChange={(event) => setCustomModelId(event.target.value)}
+              placeholder={ui.modelIdPlaceholder}
+            />
+          </div>
+          {customModelKind === "image" ? (
+            <div className="result-type-control compact-kind-control model-price-toggle">
+              <button
+                type="button"
+                className={`segment-button ${effectiveCustomModelPricingType === "input" ? "active" : ""}`}
+                onClick={() => setCustomModelPricingType("input")}
               >
-                <div className="graph-rail">
-                  <span
-                    className={`graph-line top ${isLatest ? "hidden" : ""}`}
-                  />
-                  <span className="graph-node filled" />
-                  <span
-                    className={`graph-line bottom ${
-                      index === reversedVersions.length - 1 ? "hidden" : ""
-                    }`}
-                  />
-                </div>
-                <div className="graph-content">
-                  <div className="graph-line-row">
-                    <button
-                      type="button"
-                      className="graph-message"
-                      onClick={() => {
-                        setActiveVersionId(version.id);
-                        setMainView("diff");
-                      }}
-                    >
-                      {version.label}
-                    </button>
-                    {isLatest ? (
-                      <span className="branch-pill">
-                        <CircleDot aria-hidden="true" size={14} />
-                        {ui.currentVersion}
+                {ui.modelRole("prompt-refiner")}
+              </button>
+              <button
+                type="button"
+                className={`segment-button ${effectiveCustomModelPricingType === "image" ? "active" : ""}`}
+                onClick={() => setCustomModelPricingType("image")}
+              >
+                {ui.modelRole("image-generation")}
+              </button>
+            </div>
+          ) : null}
+          <div className="custom-model-submit-row">
+            <input
+              type="number"
+              min="0"
+              step="0.000001"
+              value={customModelPrice}
+              onChange={(event) => setCustomModelPrice(event.target.value)}
+              placeholder={
+                effectiveCustomModelPricingType === "image"
+                  ? ui.imageUsdPlaceholder
+                  : ui.inputUsdPerMillionPlaceholder
+              }
+            />
+            <button type="submit" className="primary-small-button">
+              {ui.addCustomModel}
+            </button>
+          </div>
+        </form>
+      ) : null}
+
+      <div className="model-library-list">
+        {modelLibraryGroups.map((group) => (
+          <section className="model-library-section" key={group.provider}>
+            <div className="model-library-provider">
+              <span>{group.provider}</span>
+              <small>{group.items.length}</small>
+            </div>
+            <div className="model-library-rows">
+              {group.items.map(({ model, source }) => (
+                <article
+                  className="model-library-row"
+                  key={`${source}-${model.kind}-${model.id}`}
+                >
+                  <div className="model-library-main">
+                    <span className="model-library-meta">
+                      <span>{model.kind === "text" ? ui.text : ui.image}</span>
+                      <span>{ui.modelRole(model.role)}</span>
+                      <span className={`model-source-badge ${source}`}>
+                        {source === "builtin" ? ui.builtInModel : ui.userModel}
                       </span>
+                    </span>
+                    <code title={model.id}>{getModelDisplayName(model.id)}</code>
+                  </div>
+                  <div className="model-library-side">
+                    <span>{modelUnitPrice(model)}</span>
+                    {source === "custom" ? (
+                      <button
+                        type="button"
+                        className="model-library-delete-button"
+                        onClick={() => handleCustomModelDelete(model)}
+                        aria-label={ui.deleteModelAria(model.id)}
+                        title={ui.deleteModelAria(model.id)}
+                      >
+                        <Trash2 aria-hidden="true" size={14} />
+                      </button>
                     ) : null}
                   </div>
-                  <div className="graph-subline">
-                    <span>
-                      {getCommitMemo(version.notes, ui.commitMemoFallback)}
-                    </span>
-                  </div>
-                  <div className="graph-actions">
-                    <button
-                      type="button"
-                      onClick={() => continueFromVersion(version)}
-                    >
-                      checkout
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => cherryPickVersion(version)}
-                    >
-                      cherry-pick
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleVersionDelete(version.id)}
-                    >
-                      delete
-                    </button>
-                  </div>
-                </div>
-              </article>
-            );
-          })}
-        {topicVersions.length === 0 ? (
-          <div className="empty-commit-log">{ui.emptyCommitLog}</div>
-        ) : null}
+                </article>
+              ))}
+            </div>
+          </section>
+        ))}
       </div>
-    </section>
-  ) : (
-    <section className="sidebar-history empty-sidebar-history">
-      <GitBranch aria-hidden="true" size={18} />
-      <span>{ui.selectTopic}</span>
-    </section>
+    </div>
   );
+
+  const sidebarTitle =
+    sidebarView === "explorer"
+      ? ui.explorer
+      : sidebarView === "history"
+        ? ui.history
+        : ui.models;
 
   return (
     <div className="app-shell" data-theme={appearanceTheme}>
@@ -1177,8 +1782,8 @@ export function App() {
           type="button"
           className={sidebarView === "explorer" ? "active" : ""}
           onClick={() => setSidebarView("explorer")}
-          aria-label="Explorer"
-          title="Explorer"
+          aria-label={ui.explorer}
+          title={ui.explorer}
         >
           <PanelLeft aria-hidden="true" size={19} />
         </button>
@@ -1186,10 +1791,19 @@ export function App() {
           type="button"
           className={sidebarView === "history" ? "active" : ""}
           onClick={() => setSidebarView("history")}
-          aria-label="History"
-          title="History"
+          aria-label={ui.history}
+          title={ui.history}
         >
           <GitBranch aria-hidden="true" size={19} />
+        </button>
+        <button
+          type="button"
+          className={sidebarView === "models" ? "active" : ""}
+          onClick={() => setSidebarView("models")}
+          aria-label={ui.models}
+          title={ui.models}
+        >
+          <Sparkles aria-hidden="true" size={19} />
         </button>
         <button
           type="button"
@@ -1218,11 +1832,39 @@ export function App() {
       <aside className="sidebar">
         <header className="sidebar-header">
           <div>
-            <span className="sidebar-view-title">
-              {sidebarView === "explorer" ? ui.explorer : "History"}
-            </span>
+            <span className="sidebar-view-title">{sidebarTitle}</span>
             <strong>{ui.appName}</strong>
           </div>
+          {sidebarView === "explorer" ? (
+            <div className="sidebar-header-actions">
+              <button
+                type="button"
+                className="sidebar-action-button"
+                onClick={handleProjectExport}
+                disabled={!selectedProject}
+                aria-label={ui.exportProjectAria}
+                title={ui.exportProjectTitle}
+              >
+                <Download aria-hidden="true" size={15} />
+              </button>
+              <button
+                type="button"
+                className="sidebar-action-button"
+                onClick={() => projectImportInputRef.current?.click()}
+                aria-label={ui.importProjectAria}
+                title={ui.importProjectTitle}
+              >
+                <Upload aria-hidden="true" size={15} />
+              </button>
+              <input
+                ref={projectImportInputRef}
+                className="visually-hidden"
+                type="file"
+                accept=".zip,application/zip,application/x-zip-compressed"
+                onChange={handleProjectImport}
+              />
+            </div>
+          ) : null}
         </header>
 
         {sidebarView === "explorer" ? (
@@ -1252,69 +1894,35 @@ export function App() {
                     renameTarget.id === project.id;
 
                   return (
-                    <div
+                    <TreeRow
                       key={project.id}
-                      className={`project-row ${project.id === selectedProjectId ? "active" : ""} ${isRenaming ? "renaming" : ""}`}
-                    >
-                      {isRenaming ? (
-                        <div className="project-row-main row-main-editing">
-                          {project.id === selectedProjectId ? (
-                            <FolderOpen aria-hidden="true" size={15} />
-                          ) : (
-                            <Folder aria-hidden="true" size={15} />
-                          )}
-                          <input
-                            className="rename-input"
-                            value={renameTarget.value}
-                            autoFocus
-                            onChange={(event) =>
-                              updateRenameValue(event.target.value)
-                            }
-                            onBlur={() => void commitRename()}
-                            onKeyDown={handleRenameKeyDown}
-                          />
-                          <small className="tree-count">
-                            {themeCountByProject[project.id] ?? 0}
-                          </small>
-                        </div>
-                      ) : (
-                        <button
-                          type="button"
-                          className="project-row-main"
-                          onClick={() => {
-                            setSelectedProjectId(project.id);
-                            setSelectedThemeId("");
-                            setSelectedTopicId("");
-                            setCreatePanel(null);
-                          }}
-                          onDoubleClick={() =>
-                            startRename({
-                              kind: "project",
-                              id: project.id,
-                              value: project.name,
-                            })
-                          }
-                        >
-                          {project.id === selectedProjectId ? (
-                            <FolderOpen aria-hidden="true" size={15} />
-                          ) : (
-                            <Folder aria-hidden="true" size={15} />
-                          )}
-                          <span>{project.name}</span>
-                          <small className="tree-count">
-                            {themeCountByProject[project.id] ?? 0}
-                          </small>
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="row-delete-button"
-                        onClick={() => handleProjectDelete(project)}
-                        aria-label={ui.deleteProjectAria(project.name)}
-                      >
-                        <Trash2 aria-hidden="true" size={14} />
-                      </button>
-                    </div>
+                      kind="project"
+                      active={project.id === selectedProjectId}
+                      count={themeCountByProject[project.id] ?? 0}
+                      deleteLabel={ui.deleteProjectAria(project.name)}
+                      icon={
+                        project.id === selectedProjectId ? (
+                          <FolderOpen aria-hidden="true" size={15} />
+                        ) : (
+                          <Folder aria-hidden="true" size={15} />
+                        )
+                      }
+                      name={project.name}
+                      renaming={isRenaming}
+                      renameValue={renameTarget?.value}
+                      onClick={() => openProjectPath(project.id)}
+                      onDelete={() => handleProjectDelete(project)}
+                      onDoubleClick={() =>
+                        startRename({
+                          kind: "project",
+                          id: project.id,
+                          value: project.name,
+                        })
+                      }
+                      onRenameCancel={cancelRename}
+                      onRenameChange={updateRenameValue}
+                      onRenameCommit={() => void commitRename()}
+                    />
                   );
                 })}
               </div>
@@ -1388,70 +1996,36 @@ export function App() {
                     theme.id === selectedThemeId ? FolderOpen : Folder;
 
                   return (
-                    <div
+                    <TreeRow
                       key={theme.id}
-                      className={`theme-row ${theme.id === selectedThemeId ? "active" : ""} ${isRenaming ? "renaming" : ""}`}
-                    >
-                      {isRenaming ? (
-                        <div className="theme-row-main row-main-editing">
-                          <ThemeIcon
-                            aria-hidden="true"
-                            className="theme-folder-icon"
-                            size={15}
-                            style={{ color: theme.color }}
-                          />
-                          <input
-                            className="rename-input"
-                            value={renameTarget.value}
-                            autoFocus
-                            onChange={(event) =>
-                              updateRenameValue(event.target.value)
-                            }
-                            onBlur={() => void commitRename()}
-                            onKeyDown={handleRenameKeyDown}
-                          />
-                          <small className="tree-count">
-                            {topicCountByTheme[theme.id] ?? 0}
-                          </small>
-                        </div>
-                      ) : (
-                        <button
-                          type="button"
-                          className="theme-row-main"
-                          onClick={() => {
-                            setSelectedThemeId(theme.id);
-                            setSelectedTopicId("");
-                            setCreatePanel(null);
-                          }}
-                          onDoubleClick={() =>
-                            startRename({
-                              kind: "theme",
-                              id: theme.id,
-                              value: theme.name,
-                            })
-                          }
-                        >
-                          <ThemeIcon
-                            aria-hidden="true"
-                            className="theme-folder-icon"
-                            size={15}
-                            style={{ color: theme.color }}
-                          />
-                          <span>{theme.name}</span>
-                          <small className="tree-count">
-                            {topicCountByTheme[theme.id] ?? 0}
-                          </small>
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="row-delete-button"
-                        onClick={() => handleThemeDelete(theme)}
-                        aria-label={ui.deleteThemeAria(theme.name)}
-                      >
-                        <Trash2 aria-hidden="true" size={14} />
-                      </button>
-                    </div>
+                      kind="theme"
+                      active={theme.id === selectedThemeId}
+                      count={topicCountByTheme[theme.id] ?? 0}
+                      deleteLabel={ui.deleteThemeAria(theme.name)}
+                      icon={
+                        <ThemeIcon
+                          aria-hidden="true"
+                          className="theme-folder-icon"
+                          size={15}
+                          style={{ color: theme.color }}
+                        />
+                      }
+                      name={theme.name}
+                      renaming={isRenaming}
+                      renameValue={renameTarget?.value}
+                      onClick={() => openThemePath(theme.id)}
+                      onDelete={() => handleThemeDelete(theme)}
+                      onDoubleClick={() =>
+                        startRename({
+                          kind: "theme",
+                          id: theme.id,
+                          value: theme.name,
+                        })
+                      }
+                      onRenameCancel={cancelRename}
+                      onRenameChange={updateRenameValue}
+                      onRenameCommit={() => void commitRename()}
+                    />
                   );
                 })}
               </div>
@@ -1541,55 +2115,32 @@ export function App() {
                   const TopicIcon =
                     getTopicKind(topic) === "image" ? FileImage : FileText;
                   return (
-                    <div
+                    <TreeRow
                       key={topic.id}
-                      className={`topic-row ${topic.id === selectedTopicId ? "active" : ""} ${isRenaming ? "renaming" : ""}`}
-                    >
-                      {isRenaming ? (
-                        <div className="topic-row-main row-main-editing">
-                          <TopicIcon aria-hidden="true" size={15} />
-                          <input
-                            className="rename-input"
-                            value={renameTarget.value}
-                            autoFocus
-                            onChange={(event) =>
-                              updateRenameValue(event.target.value)
-                            }
-                            onBlur={() => void commitRename()}
-                            onKeyDown={handleRenameKeyDown}
-                          />
-                          <small className="tree-count">{count}</small>
-                        </div>
-                      ) : (
-                        <button
-                          type="button"
-                          className="topic-row-main"
-                          onClick={() => {
-                            setSelectedTopicId(topic.id);
-                            setCreatePanel(null);
-                          }}
-                          onDoubleClick={() =>
-                            startRename({
-                              kind: "topic",
-                              id: topic.id,
-                              value: topic.title,
-                            })
-                          }
-                        >
-                          <TopicIcon aria-hidden="true" size={15} />
-                          <span>{topic.title}</span>
-                          <small className="tree-count">{count}</small>
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="row-delete-button"
-                        onClick={() => handleTopicDelete(topic)}
-                        aria-label={ui.deleteTopicAria(topic.title)}
-                      >
-                        <Trash2 aria-hidden="true" size={14} />
-                      </button>
-                    </div>
+                      kind="topic"
+                      active={topic.id === selectedTopicId}
+                      count={count}
+                      deleteLabel={ui.deleteTopicAria(topic.title)}
+                      icon={<TopicIcon aria-hidden="true" size={15} />}
+                      name={topic.title}
+                      renaming={isRenaming}
+                      renameValue={renameTarget?.value}
+                      onClick={() => {
+                        setSelectedTopicId(topic.id);
+                        setCreatePanel(null);
+                      }}
+                      onDelete={() => handleTopicDelete(topic)}
+                      onDoubleClick={() =>
+                        startRename({
+                          kind: "topic",
+                          id: topic.id,
+                          value: topic.title,
+                        })
+                      }
+                      onRenameCancel={cancelRename}
+                      onRenameChange={updateRenameValue}
+                      onRenameCommit={() => void commitRename()}
+                    />
                   );
                 })}
               </div>
@@ -1618,7 +2169,10 @@ export function App() {
                       <button
                         type="button"
                         className={`segment-button ${newTopicKind === "text" ? "active" : ""}`}
-                        onClick={() => setNewTopicKind("text")}
+                        onClick={() => {
+                          setNewTopicKind("text");
+                          setNewTopicModelIds(defaultModelIdsByKind.text);
+                        }}
                       >
                         <FileText aria-hidden="true" size={15} />
                         {ui.text}
@@ -1626,13 +2180,32 @@ export function App() {
                       <button
                         type="button"
                         className={`segment-button ${newTopicKind === "image" ? "active" : ""}`}
-                        onClick={() => setNewTopicKind("image")}
+                        onClick={() => {
+                          setNewTopicKind("image");
+                          setNewTopicModelIds(defaultModelIdsByKind.image);
+                        }}
                       >
                         <ImageIcon aria-hidden="true" size={15} />
                         {ui.image}
                       </button>
                     </div>
                   </div>
+                  <TagPopoverSelect
+                    addLabel={ui.addModel}
+                    emptyLabel={ui.noModelOptions}
+                    label={ui.model}
+                    options={getModelOptions(newTopicKind, customModels).map((option) => ({
+                      description: ui.modelRole(option.role),
+                      displayLabel: getModelDisplayName(option.id),
+                      group: option.provider,
+                      id: option.id,
+                      label: option.label,
+                    }))}
+                    placeholder={ui.modelPickerPlaceholder}
+                    removeLabel={ui.removeModelAria}
+                    value={newTopicModelIds}
+                    onChange={(value) => setNewTopicModelIds(value as TopicModelId[])}
+                  />
                   <label className="create-field">
                     <span>{ui.name}</span>
                     <input
@@ -1667,8 +2240,10 @@ export function App() {
               </section>
             ) : null}
           </div>
-        ) : (
+        ) : sidebarView === "history" ? (
           historySidebar
+        ) : (
+          modelsSidebar
         )}
       </aside>
 
@@ -1715,197 +2290,92 @@ export function App() {
                 onClick={() => setMainView("diff")}
               >
                 <Diff aria-hidden="true" size={15} />
-                Diff
+                {ui.diff}
                 <span className="tab-diff-summary">
-                  +{addedCount} -{removedCount}
+                  <span className="added">+{addedCount}</span>
+                  <span className="removed">-{removedCount}</span>
                 </span>
+              </button>
+              <button
+                type="button"
+                className={mainView === "cost" ? "active" : ""}
+                onClick={() => setMainView("cost")}
+              >
+                <ChartNoAxesColumnIncreasing aria-hidden="true" size={15} />
+                {ui.costTab}
               </button>
             </nav>
 
-            <div className="main-view">
+            <div
+              className={`main-view ${
+                mainView === "diff"
+                  ? "diff-view"
+                  : mainView === "cost"
+                    ? "cost-view"
+                    : "write-view"
+              }`}
+            >
               {mainView === "write" ? (
-                <section className="panel editor-panel">
-                  <div className="panel-heading">
-                    <h3>{ui.write}</h3>
-                    <span>
-                      {ui.promptChars(
-                        draftBody.length.toLocaleString(),
-                        selectedTopicKind === "text"
-                          ? draftResultText.length.toLocaleString()
-                          : undefined,
-                      )}
-                    </span>
-                  </div>
-                  <label>
-                    {ui.versionName}
-                    <input
-                      value={draftLabel}
-                      onChange={(event) => {
-                        setDraftLabel(event.target.value);
-                        setActiveVersionId("draft");
-                      }}
-                      placeholder={ui.versionNamePlaceholder}
-                    />
-                  </label>
-                  <label className="editor-field">
-                    {ui.prompt}
-                    <textarea
-                      value={draftBody}
-                      onChange={(event) => {
-                        setDraftBody(event.target.value);
-                        setActiveVersionId("draft");
-                      }}
-                      placeholder={ui.promptPlaceholder}
-                    />
-                  </label>
-                  {selectedTopicKind === "text" ? (
-                    <label className="editor-field result-text-field">
-                      {ui.resultText}
-                      <textarea
-                        value={draftResultText}
-                        onChange={(event) => {
-                          setDraftResultText(event.target.value);
-                          setActiveVersionId("draft");
-                        }}
-                        placeholder={ui.resultTextPlaceholder}
-                      />
-                    </label>
-                  ) : null}
-                  <label>
-                    {ui.notes}
-                    <textarea
-                      value={draftNotes}
-                      onChange={(event) => {
-                        setDraftNotes(event.target.value);
-                        setActiveVersionId("draft");
-                      }}
-                      placeholder={ui.notesPlaceholder}
-                      rows={3}
-                    />
-                  </label>
-
-                  {selectedTopicKind === "image" ? (
-                    <div className="image-result-section">
-                      <div className="image-input-panel">
-                        <div className="upload-row">
-                          <label className="file-button">
-                            <ImagePlus aria-hidden="true" size={17} />
-                            {ui.resultImageUpload}
-                            <input
-                              type="file"
-                              accept="image/*"
-                              multiple
-                              onChange={handleImageUpload}
-                            />
-                          </label>
-                          <span>{ui.resultImageCount(draftImages.length)}</span>
-                        </div>
-                        <button
-                          type="button"
-                          className={`paste-target ${pasteTargetActive ? "active" : ""}`}
-                          onClick={(event) => event.currentTarget.focus()}
-                          onFocus={() => setPasteTargetActive(true)}
-                          onBlur={() => setPasteTargetActive(false)}
-                          onPaste={handleImagePaste}
-                        >
-                          <ClipboardPaste aria-hidden="true" size={18} />
-                          <span>
-                            <strong>{ui.pasteImage}</strong>
-                            <small>{ui.pasteImageHint}</small>
-                          </span>
-                        </button>
-                      </div>
-
-                      {draftImages.length > 0 ? (
-                        <div className="image-grid compact">
-                          {draftImages.map((image) => (
-                            <figure key={image.id} className="image-tile">
-                              <img src={image.dataUrl} alt={image.name} />
-                              <figcaption>
-                                <span>{image.name}</span>
-                                <button
-                                  type="button"
-                                  className="ghost-icon"
-                                  onClick={() =>
-                                    setDraftImages((current) =>
-                                      current.filter(
-                                        (item) => item.id !== image.id,
-                                      ),
-                                    )
-                                  }
-                                  aria-label={ui.deleteImageAria(image.name)}
-                                >
-                                  <Trash2 aria-hidden="true" size={14} />
-                                </button>
-                              </figcaption>
-                            </figure>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </section>
+                <WritePanel
+                  draftBody={draftBody}
+                  draftImages={draftImages}
+                  draftLabel={draftLabel}
+                  draftNotes={draftNotes}
+                  draftResultText={draftResultText}
+                  modelOptions={selectedTopicModelOptions}
+                  pasteTargetActive={pasteTargetActive}
+                  previousBody={latestVersion?.body ?? ""}
+                  previousResultText={getVersionResultText(latestVersion)}
+                  selectedModelIds={selectedTopicModelIds}
+                  selectedTopicKind={selectedTopicKind}
+                  ui={ui}
+                  onDraftBodyChange={(value) => {
+                    setDraftBody(value);
+                    setActiveVersionId("draft");
+                  }}
+                  onDraftLabelChange={(value) => {
+                    setDraftLabel(value);
+                    setActiveVersionId("draft");
+                  }}
+                  onDraftNotesChange={(value) => {
+                    setDraftNotes(value);
+                    setActiveVersionId("draft");
+                  }}
+                  onDraftResultTextChange={(value) => {
+                    setDraftResultText(value);
+                    setActiveVersionId("draft");
+                  }}
+                  onImagePaste={handleImagePaste}
+                  onImageUpload={handleImageUpload}
+                  onModelChange={(value) => void updateSelectedTopicModels(value)}
+                  onPasteTargetActiveChange={setPasteTargetActive}
+                  onRemoveDraftImage={(imageId) =>
+                    setDraftImages((current) =>
+                      current.filter((item) => item.id !== imageId),
+                    )
+                  }
+                />
+              ) : mainView === "diff" ? (
+                <DiffPanel
+                  addedCount={addedCount}
+                  compareBase={compareBase}
+                  compareBaseImages={compareBaseImages}
+                  compareTargetImages={compareTargetImages}
+                  compareTargetKind={compareTargetKind}
+                  compareTargetLabel={compareTargetLabel}
+                  lineDiffRows={lineDiffRows}
+                  removedCount={removedCount}
+                  ui={ui}
+                />
               ) : (
-                <section className="panel diff-panel">
-                  <div className="diff-titlebar">
-                    <div className="editor-tab active">
-                      <Diff aria-hidden="true" size={15} />
-                      {"prompt.diff"}
-                    </div>
-                    <div className="diff-summary">
-                      <span className="added">+{addedCount}</span>
-                      <span className="removed">-{removedCount}</span>
-                    </div>
-                  </div>
-                  <div
-                    className="split-diff"
-                    aria-label={
-                      compareTargetKind === "text"
-                        ? ui.promptDiffAria
-                        : ui.imageDiffAria
-                    }
-                  >
-                    <DiffFile
-                      side="left"
-                      title={compareBase?.label ?? ui.noPreviousVersion}
-                      kind={compareBase ? compareBaseKind : null}
-                      rows={lineDiffRows}
-                      emptyLabel={ui.emptyContent}
-                      imageLabel={ui.imageKind}
-                      textLabel={ui.textKind}
-                    />
-                    <DiffFile
-                      side="right"
-                      title={compareTargetLabel}
-                      kind={compareTargetKind}
-                      rows={lineDiffRows}
-                      emptyLabel={ui.emptyContent}
-                      imageLabel={ui.imageKind}
-                      textLabel={ui.textKind}
-                    />
-                  </div>
-
-                  {compareTargetKind === "image" ? (
-                    <div className="asset-diff-panel">
-                      <div className="asset-diff-title">
-                        <FileImage aria-hidden="true" size={15} />
-                        {ui.resultImage}
-                      </div>
-                      <div className="image-compare">
-                        <ImageColumn
-                          title={ui.resultImagePrevious}
-                          images={compareBaseImages}
-                          emptyLabel={ui.emptyImage}
-                        />
-                        <ImageColumn
-                          title={ui.resultImageCurrent}
-                          images={compareTargetImages}
-                          emptyLabel={ui.emptyImage}
-                        />
-                      </div>
-                    </div>
-                  ) : null}
-                </section>
+                <CostTrendPanel
+                  currentMetrics={currentDraftCostMetrics}
+                  exchangeRate={usdKrwExchangeRate}
+                  locale={locale}
+                  metricsByVersion={metricsByVersion}
+                  topicVersions={topicVersions}
+                  ui={ui}
+                />
               )}
             </div>
           </>
@@ -1931,121 +2401,6 @@ export function App() {
         onCancel={closeConfirm}
         onConfirm={confirmCurrentAction}
       />
-    </div>
-  );
-}
-
-type ImageColumnProps = {
-  title: string;
-  images: Array<ImageAsset | DraftImage>;
-  emptyLabel: string;
-};
-
-function KindBadge({
-  kind,
-  imageLabel,
-  textLabel,
-}: {
-  kind: PromptVersionKind;
-  imageLabel: string;
-  textLabel: string;
-}) {
-  return (
-    <span className={`kind-badge ${kind}`}>
-      {kind === "image" ? imageLabel : textLabel}
-    </span>
-  );
-}
-
-type DiffFileProps = {
-  side: "left" | "right";
-  title: string;
-  kind: PromptVersionKind | null;
-  rows: LineDiffRow[];
-  emptyLabel: string;
-  imageLabel: string;
-  textLabel: string;
-};
-
-function DiffFile({
-  side,
-  title,
-  kind,
-  rows,
-  emptyLabel,
-  imageLabel,
-  textLabel,
-}: DiffFileProps) {
-  const isLeft = side === "left";
-
-  return (
-    <div className="diff-file">
-      <div className="diff-file-header">
-        <span>{title}</span>
-        {kind ? (
-          <KindBadge
-            kind={kind}
-            imageLabel={imageLabel}
-            textLabel={textLabel}
-          />
-        ) : null}
-      </div>
-      <div className="code-lines">
-        {rows.length > 0 ? (
-          rows.map((row) => {
-            const visible =
-              row.type === "same" ||
-              (isLeft && row.type === "removed") ||
-              (!isLeft && row.type === "added");
-            const lineNumber = isLeft
-              ? row.leftLineNumber
-              : row.rightLineNumber;
-            const text = isLeft ? row.leftText : row.rightText;
-            const marker =
-              row.type === "same" || !visible ? "" : isLeft ? "-" : "+";
-
-            return (
-              <div
-                key={`${side}-${row.id}`}
-                className={`code-line ${visible ? row.type : "empty"}`}
-              >
-                <span className="line-number">{lineNumber ?? ""}</span>
-                <span className="change-marker">{marker}</span>
-                <code>{visible ? text || " " : ""}</code>
-              </div>
-            );
-          })
-        ) : (
-          <div className="code-line empty-message">
-            <span className="line-number" />
-            <span className="change-marker" />
-            <code>{emptyLabel}</code>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ImageColumn({ title, images, emptyLabel }: ImageColumnProps) {
-  return (
-    <div className="image-column">
-      <div className="image-column-title">
-        <FileImage aria-hidden="true" size={15} />
-        <span>{title}</span>
-      </div>
-      {images.length > 0 ? (
-        <div className="image-grid">
-          {images.map((image) => (
-            <figure key={image.id} className="image-tile">
-              <img src={image.dataUrl} alt={image.name} />
-              <figcaption>{image.name}</figcaption>
-            </figure>
-          ))}
-        </div>
-      ) : (
-        <div className="empty-image">{emptyLabel}</div>
-      )}
     </div>
   );
 }
