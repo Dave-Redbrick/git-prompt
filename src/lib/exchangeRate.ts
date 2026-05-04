@@ -67,8 +67,30 @@ const writeUsdKrwExchangeRate = (exchangeRate: UsdKrwExchangeRate) => {
   }
 };
 
-const isFreshForToday = (exchangeRate: UsdKrwExchangeRate | null) =>
-  exchangeRate?.fetchedFor === getLocalDateKey();
+const isFreshFetchedRateForToday = (exchangeRate: UsdKrwExchangeRate | null) =>
+  exchangeRate?.fetchedFor === getLocalDateKey() && !exchangeRate.fallback;
+
+type FrankfurterRateResponse =
+  | { date?: string; rates?: { KRW?: number } }
+  | Array<{ base?: string; date?: string; quote?: string; rate?: number }>;
+
+const parseUsdKrwRateResponse = (data: FrankfurterRateResponse) => {
+  if (Array.isArray(data)) {
+    const matchedRate =
+      data.find((item) => item.base === "USD" && item.quote === "KRW") ??
+      data[0];
+
+    return {
+      date: matchedRate?.date ?? "",
+      rate: Number(matchedRate?.rate),
+    };
+  }
+
+  return {
+    date: data.date ?? "",
+    rate: Number(data.rates?.KRW),
+  };
+};
 
 const createFallbackExchangeRate = (): UsdKrwExchangeRate => ({
   base: "USD",
@@ -95,7 +117,7 @@ export const useUsdKrwExchangeRate = (enabled: boolean) => {
 
     setExchangeRate(cachedExchangeRate ?? fallbackExchangeRate);
 
-    if (isFreshForToday(cachedExchangeRate)) {
+    if (isFreshFetchedRateForToday(cachedExchangeRate)) {
       return;
     }
 
@@ -108,10 +130,10 @@ export const useUsdKrwExchangeRate = (enabled: boolean) => {
           throw new Error(`Exchange rate request failed: ${response.status}`);
         }
 
-        return response.json() as Promise<{ date?: string; rates?: { KRW?: number } }>;
+        return response.json() as Promise<FrankfurterRateResponse>;
       })
       .then((data) => {
-        const rate = Number(data.rates?.KRW);
+        const { date, rate } = parseUsdKrwRateResponse(data);
 
         if (!Number.isFinite(rate) || rate <= 0) {
           throw new Error("Invalid USD/KRW exchange rate");
@@ -121,7 +143,7 @@ export const useUsdKrwExchangeRate = (enabled: boolean) => {
           base: "USD",
           quote: "KRW",
           rate,
-          date: data.date ?? "",
+          date,
           fetchedAt: new Date().toISOString(),
           fetchedFor: getLocalDateKey(),
         };
