@@ -23,7 +23,10 @@ import {
   Save,
   Sparkles,
   Trash2,
+  X,
 } from "lucide-react";
+import { ConfirmModal, type ConfirmDialogState } from "./components/ConfirmModal";
+import { Toast, type ToastState, type ToastVariant } from "./components/Toast";
 import { createId, deleteItem, getAll, nowIso, putItem, seedIfEmpty } from "./lib/db";
 import { diffLines, type LineDiffRow } from "./lib/diff";
 import type {
@@ -158,8 +161,11 @@ export function App() {
   const [selectedTopicId, setSelectedTopicId] = useState(savedSelection.topicId);
   const [activeVersionId, setActiveVersionId] = useState("draft");
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
+  const [toast, setToast] = useState<ToastState | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [sidebarView, setSidebarView] = useState<"explorer" | "history">("explorer");
+  const [mainView, setMainView] = useState<"write" | "diff">("write");
   const [createPanel, setCreatePanel] = useState<"project" | "theme" | "topic" | null>(null);
 
   const [newProjectName, setNewProjectName] = useState("");
@@ -177,8 +183,37 @@ export function App() {
   const [draftImages, setDraftImages] = useState<DraftImage[]>([]);
   const [pasteTargetActive, setPasteTargetActive] = useState(false);
 
+  const showToast = (message: string, variant: ToastVariant = "success") => {
+    setToast({ id: Date.now(), message, variant });
+  };
+
+  const requestConfirm = (dialog: ConfirmDialogState) => {
+    setConfirmDialog(dialog);
+  };
+
+  const closeConfirm = () => {
+    if (!confirmBusy) {
+      setConfirmDialog(null);
+    }
+  };
+
+  const confirmCurrentAction = async () => {
+    if (!confirmDialog) {
+      return;
+    }
+
+    try {
+      setConfirmBusy(true);
+      await confirmDialog.onConfirm();
+      setConfirmDialog(null);
+    } catch (confirmError) {
+      showToast(confirmError instanceof Error ? confirmError.message : "작업을 완료하지 못했습니다.", "error");
+    } finally {
+      setConfirmBusy(false);
+    }
+  };
+
   const loadData = async (seedInitialData = false) => {
-    setError("");
     if (seedInitialData) {
       await seedIfEmpty();
     }
@@ -207,7 +242,7 @@ export function App() {
         await loadData(true);
       } catch (loadError) {
         if (mounted) {
-          setError(loadError instanceof Error ? loadError.message : "IndexedDB를 열 수 없습니다.");
+          showToast(loadError instanceof Error ? loadError.message : "IndexedDB를 열 수 없습니다.", "error");
         }
       } finally {
         if (mounted) {
@@ -310,6 +345,7 @@ export function App() {
       setDraftNotes("");
       setDraftImages([]);
       setActiveVersionId("draft");
+      setMainView("write");
       return;
     }
 
@@ -324,6 +360,7 @@ export function App() {
         : [],
     );
     setActiveVersionId("draft");
+    setMainView("write");
   }, [loading, selectedTopicId, selectedTopicKind]);
 
   const selectedStoredVersion =
@@ -381,7 +418,7 @@ export function App() {
     try {
       await loadData();
     } catch (refreshError) {
-      setError(refreshError instanceof Error ? refreshError.message : "데이터를 다시 읽을 수 없습니다.");
+      showToast(refreshError instanceof Error ? refreshError.message : "데이터를 다시 읽을 수 없습니다.", "error");
     }
   };
 
@@ -406,22 +443,24 @@ export function App() {
     setSelectedThemeId("");
     setSelectedTopicId("");
     setCreatePanel(null);
-    setNotice("프로젝트를 저장했습니다.");
+    showToast("프로젝트를 저장했습니다.");
     await refresh();
   };
 
-  const handleProjectDelete = async (projectToDelete = selectedProject) => {
+  const handleProjectDelete = (projectToDelete = selectedProject) => {
     if (!projectToDelete) {
       return;
     }
 
-    const ok = window.confirm(
-      `"${projectToDelete.name}" 프로젝트와 포함된 테마, 주제, 버전, 이미지를 모두 삭제할까요?`,
-    );
-    if (!ok) {
-      return;
-    }
+    requestConfirm({
+      title: "프로젝트 삭제",
+      message: `"${projectToDelete.name}" 프로젝트와 포함된 테마, 주제, 버전, 이미지를 모두 삭제할까요?`,
+      confirmLabel: "삭제",
+      onConfirm: () => deleteProject(projectToDelete),
+    });
+  };
 
+  const deleteProject = async (projectToDelete: Project) => {
     const topicIds = store.topics
       .filter((topic) => topic.projectId === projectToDelete.id)
       .map((topic) => topic.id);
@@ -447,7 +486,7 @@ export function App() {
     setSelectedProjectId(nextProject?.id ?? "");
     setSelectedTopicId("");
     setCreatePanel(null);
-    setNotice("프로젝트를 삭제했습니다.");
+    showToast("프로젝트를 삭제했습니다.");
     await refresh();
   };
 
@@ -472,7 +511,7 @@ export function App() {
     setSelectedThemeId(id);
     setSelectedTopicId("");
     setCreatePanel(null);
-    setNotice("테마 폴더를 저장했습니다.");
+    showToast("테마 폴더를 저장했습니다.");
     await refresh();
   };
 
@@ -500,16 +539,20 @@ export function App() {
     setNewTopicKind("text");
     setSelectedTopicId(id);
     setCreatePanel(null);
-    setNotice("주제를 저장했습니다.");
+    showToast("주제를 저장했습니다.");
     await refresh();
   };
 
-  const handleTopicDelete = async (topic: Topic) => {
-    const ok = window.confirm(`"${topic.title}" 주제와 저장된 버전, 이미지를 모두 삭제할까요?`);
-    if (!ok) {
-      return;
-    }
+  const handleTopicDelete = (topic: Topic) => {
+    requestConfirm({
+      title: "주제 삭제",
+      message: `"${topic.title}" 주제와 저장된 버전, 이미지를 모두 삭제할까요?`,
+      confirmLabel: "삭제",
+      onConfirm: () => deleteTopic(topic),
+    });
+  };
 
+  const deleteTopic = async (topic: Topic) => {
     const versionIds = store.versions
       .filter((version) => version.topicId === topic.id)
       .map((version) => version.id);
@@ -526,7 +569,7 @@ export function App() {
     const nextTopic = themeTopics.find((themeTopic) => themeTopic.id !== topic.id);
     setSelectedTopicId(nextTopic?.id ?? "");
     setCreatePanel(null);
-    setNotice("주제를 삭제했습니다.");
+    showToast("주제를 삭제했습니다.");
     await refresh();
   };
 
@@ -549,7 +592,7 @@ export function App() {
 
     const files = getCurrentClipboardImageFiles(event.clipboardData);
     if (files.length === 0) {
-      setNotice("현재 클립보드에 붙여넣을 이미지가 없습니다.");
+      showToast("현재 클립보드에 붙여넣을 이미지가 없습니다.", "error");
       return;
     }
 
@@ -564,7 +607,7 @@ export function App() {
 
     setDraftImages((current) => [...current, ...images]);
     setActiveVersionId("draft");
-    setNotice("현재 클립보드의 이미지를 추가했습니다.");
+    showToast("현재 클립보드의 이미지를 추가했습니다.");
   };
 
 
@@ -575,13 +618,13 @@ export function App() {
 
     const body = draftBody.trim();
     if (!body) {
-      setError("저장할 프롬프트가 비어 있습니다.");
+      showToast("저장할 프롬프트가 비어 있습니다.", "error");
       return;
     }
 
     const resultText = draftResultText.trim();
     if (selectedTopicKind === "text" && !resultText) {
-      setError("텍스트 결과를 입력해야 합니다.");
+      showToast("텍스트 결과를 입력해야 합니다.", "error");
       return;
     }
 
@@ -634,10 +677,21 @@ export function App() {
       })),
     );
     setActiveVersionId(versionId);
-    setNotice("강화본을 저장했습니다.");
+    showToast("강화본을 저장했습니다.");
   };
 
-  const handleVersionDelete = async (versionId: string) => {
+  const handleVersionDelete = (versionId: string) => {
+    const version = topicVersions.find((item) => item.id === versionId);
+
+    requestConfirm({
+      title: "버전 삭제",
+      message: `"${version?.label ?? "선택한 버전"}" 버전과 연결된 이미지를 삭제할까요?`,
+      confirmLabel: "삭제",
+      onConfirm: () => deleteVersion(versionId),
+    });
+  };
+
+  const deleteVersion = async (versionId: string) => {
     const imageIds = store.images
       .filter((image) => image.versionId === versionId)
       .map((image) => image.id);
@@ -657,7 +711,7 @@ export function App() {
     );
     await refresh();
     setActiveVersionId("draft");
-    setNotice("버전을 삭제했습니다.");
+    showToast("버전을 삭제했습니다.");
   };
 
   const continueFromVersion = (version: PromptVersion) => {
@@ -670,6 +724,7 @@ export function App() {
       getVersionKind(version) === "image" ? copyImagesToDraft(imagesByVersion[version.id] ?? []) : [],
     );
     setActiveVersionId("draft");
+    setMainView("write");
   };
 
   if (loading) {
@@ -681,8 +736,136 @@ export function App() {
     );
   }
 
+  const historySidebar = selectedTopic ? (
+    <section className="sidebar-history">
+      <div className="history-header">
+        <div>
+          <h3>
+            <GitBranch aria-hidden="true" size={15} />
+            {selectedTopic.title}
+          </h3>
+          <span>{topicVersions.length} commits</span>
+        </div>
+        {hasDraftChanges ? <span className="working-tree-badge">working tree</span> : null}
+      </div>
+      <div className="commit-graph" aria-label="저장 기록">
+        {activeVersionId === "draft" && hasDraftChanges ? (
+          <article className="commit-row draft active">
+            <div className="commit-rail">
+              <span className="commit-line top-hidden" />
+              <span className="commit-dot draft-dot" />
+              <span className="commit-line" />
+            </div>
+            <div className="commit-content">
+              <div className="commit-title-row">
+                <button
+                  type="button"
+                  className="commit-title"
+                  onClick={() => {
+                    setActiveVersionId("draft");
+                    setMainView("diff");
+                  }}
+                >
+                  작성 중
+                </button>
+                <span className="head-badge">HEAD</span>
+              </div>
+              <p>{selectedTopicKind === "text" ? draftResultText || draftBody : draftBody}</p>
+            </div>
+          </article>
+        ) : null}
+        {[...topicVersions].reverse().map((version, index, reversedVersions) => {
+          const isActive = version.id === activeVersionId;
+          const preview = selectedTopicKind === "text" ? getVersionResultText(version) : version.body;
+          const shortHash = version.id.replace(/-/g, "").slice(0, 7);
+
+          return (
+            <article key={version.id} className={`commit-row ${isActive ? "active" : ""}`}>
+              <div className="commit-rail">
+                <span
+                  className={`commit-line ${
+                    index === 0 && !(activeVersionId === "draft" && hasDraftChanges) ? "top-hidden" : ""
+                  }`}
+                />
+                <span className="commit-dot">
+                  <GitCommitHorizontal aria-hidden="true" size={13} />
+                </span>
+                <span
+                  className={`commit-line ${
+                    index === reversedVersions.length - 1 ? "bottom-hidden" : ""
+                  }`}
+                />
+              </div>
+              <div className="commit-content">
+                <div className="commit-title-row">
+                  <button
+                    type="button"
+                    className="commit-title"
+                    onClick={() => {
+                      setActiveVersionId(version.id);
+                      setMainView("diff");
+                    }}
+                  >
+                    {version.label}
+                  </button>
+                  {isActive ? <span className="head-badge">HEAD</span> : null}
+                  <KindBadge kind={selectedTopicKind} />
+                </div>
+                <div className="commit-meta">
+                  <span>{shortHash}</span>
+                  <span>
+                    <Clock3 aria-hidden="true" size={13} />
+                    {formatDateTime(version.createdAt)}
+                  </span>
+                </div>
+                <p>{preview}</p>
+                <div className="commit-actions">
+                  <button type="button" onClick={() => continueFromVersion(version)}>
+                    checkout
+                  </button>
+                  <button type="button" onClick={() => handleVersionDelete(version.id)}>
+                    delete
+                  </button>
+                </div>
+              </div>
+            </article>
+          );
+        })}
+        {topicVersions.length === 0 ? (
+          <div className="empty-commit-log">아직 저장된 커밋이 없습니다.</div>
+        ) : null}
+      </div>
+    </section>
+  ) : (
+    <section className="sidebar-history empty-sidebar-history">
+      <GitBranch aria-hidden="true" size={18} />
+      <span>주제를 선택하세요</span>
+    </section>
+  );
+
   return (
     <div className="app-shell">
+      <nav className="activity-bar" aria-label="작업 보기">
+        <button
+          type="button"
+          className={sidebarView === "explorer" ? "active" : ""}
+          onClick={() => setSidebarView("explorer")}
+          aria-label="Explorer"
+          title="Explorer"
+        >
+          <PanelLeft aria-hidden="true" size={19} />
+        </button>
+        <button
+          type="button"
+          className={sidebarView === "history" ? "active" : ""}
+          onClick={() => setSidebarView("history")}
+          aria-label="History"
+          title="History"
+        >
+          <GitBranch aria-hidden="true" size={19} />
+        </button>
+      </nav>
+
       <aside className="sidebar">
         <header className="brand">
           <div className="brand-mark">
@@ -694,7 +877,11 @@ export function App() {
           </div>
         </header>
 
-        <section className="sidebar-section">
+        <div className="sidebar-view-title">{sidebarView === "explorer" ? "Explorer" : "History"}</div>
+
+        {sidebarView === "explorer" ? (
+          <div className="explorer-pane">
+            <section className="sidebar-section">
           <div className="section-title">
             <span className="section-title-label">
               <PanelLeft aria-hidden="true" size={16} />
@@ -738,20 +925,40 @@ export function App() {
             ))}
           </div>
           {createPanel === "project" ? (
-            <form className="create-form compact-form" onSubmit={handleProjectCreate}>
-              <input
-                value={newProjectName}
-                onChange={(event) => setNewProjectName(event.target.value)}
-                placeholder="새 프로젝트"
-              />
-              <button type="submit" className="icon-button" aria-label="프로젝트 추가">
-                <Plus aria-hidden="true" size={17} />
-              </button>
+            <form className="create-form create-panel" onSubmit={handleProjectCreate}>
+              <div className="create-panel-header">
+                <span>새 프로젝트</span>
+                <button
+                  type="button"
+                  className="mini-icon-button"
+                  onClick={() => setCreatePanel(null)}
+                  aria-label="닫기"
+                >
+                  <X aria-hidden="true" size={14} />
+                </button>
+              </div>
+              <label className="create-field">
+                <span>이름</span>
+                <input
+                  value={newProjectName}
+                  onChange={(event) => setNewProjectName(event.target.value)}
+                  placeholder="project-name"
+                />
+              </label>
+              <div className="create-actions">
+                <button type="button" className="secondary-button" onClick={() => setCreatePanel(null)}>
+                  취소
+                </button>
+                <button type="submit" className="primary-small-button">
+                  <Plus aria-hidden="true" size={15} />
+                  추가
+                </button>
+              </div>
             </form>
           ) : null}
-        </section>
+            </section>
 
-        <section className="sidebar-section">
+            <section className="sidebar-section">
           <div className="section-title">
             <span className="section-title-label">
               <Layers3 aria-hidden="true" size={16} />
@@ -783,34 +990,55 @@ export function App() {
             ))}
           </div>
           {createPanel === "theme" ? (
-            <form className="create-form stacked-form" onSubmit={handleThemeCreate}>
-              <div className="color-row">
-                {themeColors.map((color) => (
-                  <button
-                    key={color}
-                    type="button"
-                    className={`color-dot ${newThemeColor === color ? "selected" : ""}`}
-                    style={{ backgroundColor: color }}
-                    onClick={() => setNewThemeColor(color)}
-                    aria-label={`테마 색상 ${color}`}
-                  />
-                ))}
+            <form className="create-form create-panel" onSubmit={handleThemeCreate}>
+              <div className="create-panel-header">
+                <span>새 테마</span>
+                <button
+                  type="button"
+                  className="mini-icon-button"
+                  onClick={() => setCreatePanel(null)}
+                  aria-label="닫기"
+                >
+                  <X aria-hidden="true" size={14} />
+                </button>
               </div>
-              <div className="compact-form">
+              <label className="create-field">
+                <span>이름</span>
                 <input
                   value={newThemeName}
                   onChange={(event) => setNewThemeName(event.target.value)}
-                  placeholder="새 테마"
+                  placeholder="folder-name"
                 />
-                <button type="submit" className="icon-button" aria-label="테마 추가">
-                  <Plus aria-hidden="true" size={17} />
+              </label>
+              <div className="create-field">
+                <span>색상</span>
+                <div className="color-row">
+                  {themeColors.map((color) => (
+                    <button
+                      key={color}
+                      type="button"
+                      className={`color-dot ${newThemeColor === color ? "selected" : ""}`}
+                      style={{ backgroundColor: color }}
+                      onClick={() => setNewThemeColor(color)}
+                      aria-label={`테마 색상 ${color}`}
+                    />
+                  ))}
+                </div>
+              </div>
+              <div className="create-actions">
+                <button type="button" className="secondary-button" onClick={() => setCreatePanel(null)}>
+                  취소
+                </button>
+                <button type="submit" className="primary-small-button">
+                  <Plus aria-hidden="true" size={15} />
+                  추가
                 </button>
               </div>
             </form>
           ) : null}
-        </section>
+            </section>
 
-        <section className="sidebar-section topic-section">
+            <section className="sidebar-section topic-section">
           <div className="section-title">
             <span className="section-title-label">
               <Diff aria-hidden="true" size={16} />
@@ -854,49 +1082,75 @@ export function App() {
             })}
           </div>
           {createPanel === "topic" ? (
-            <form className="create-form stacked-form" onSubmit={handleTopicCreate}>
-              <div className="result-type-control compact-kind-control" aria-label="주제 결과 타입">
+            <form className="create-form create-panel" onSubmit={handleTopicCreate}>
+              <div className="create-panel-header">
+                <span>새 주제</span>
                 <button
                   type="button"
-                  className={`segment-button ${newTopicKind === "text" ? "active" : ""}`}
-                  onClick={() => setNewTopicKind("text")}
+                  className="mini-icon-button"
+                  onClick={() => setCreatePanel(null)}
+                  aria-label="닫기"
                 >
-                  <FileText aria-hidden="true" size={15} />
-                  텍스트
-                </button>
-                <button
-                  type="button"
-                  className={`segment-button ${newTopicKind === "image" ? "active" : ""}`}
-                  onClick={() => setNewTopicKind("image")}
-                >
-                  <ImageIcon aria-hidden="true" size={15} />
-                  이미지
+                  <X aria-hidden="true" size={14} />
                 </button>
               </div>
-              <input
-                value={newTopicTitle}
-                onChange={(event) => setNewTopicTitle(event.target.value)}
-                placeholder="새 주제"
-              />
-              <textarea
-                value={newTopicBrief}
-                onChange={(event) => setNewTopicBrief(event.target.value)}
-                placeholder="메모"
-                rows={3}
-              />
-              <button type="submit" className="wide-button">
-                <Plus aria-hidden="true" size={16} />
-                주제 추가
-              </button>
+              <div className="create-field">
+                <span>결과</span>
+                <div className="result-type-control compact-kind-control" aria-label="주제 결과 타입">
+                  <button
+                    type="button"
+                    className={`segment-button ${newTopicKind === "text" ? "active" : ""}`}
+                    onClick={() => setNewTopicKind("text")}
+                  >
+                    <FileText aria-hidden="true" size={15} />
+                    텍스트
+                  </button>
+                  <button
+                    type="button"
+                    className={`segment-button ${newTopicKind === "image" ? "active" : ""}`}
+                    onClick={() => setNewTopicKind("image")}
+                  >
+                    <ImageIcon aria-hidden="true" size={15} />
+                    이미지
+                  </button>
+                </div>
+              </div>
+              <label className="create-field">
+                <span>이름</span>
+                <input
+                  value={newTopicTitle}
+                  onChange={(event) => setNewTopicTitle(event.target.value)}
+                  placeholder="topic-name"
+                />
+              </label>
+              <label className="create-field">
+                <span>메모</span>
+                <textarea
+                  value={newTopicBrief}
+                  onChange={(event) => setNewTopicBrief(event.target.value)}
+                  placeholder="optional"
+                  rows={3}
+                />
+              </label>
+              <div className="create-actions">
+                <button type="button" className="secondary-button" onClick={() => setCreatePanel(null)}>
+                  취소
+                </button>
+                <button type="submit" className="primary-small-button">
+                  <Plus aria-hidden="true" size={15} />
+                  추가
+                </button>
+              </div>
             </form>
           ) : null}
-        </section>
+            </section>
+          </div>
+        ) : (
+          historySidebar
+        )}
       </aside>
 
       <main className="workspace">
-        {error ? <div className="status error">{error}</div> : null}
-        {notice ? <div className="status">{notice}</div> : null}
-
         {selectedTopic ? (
           <>
             <header className="workspace-header">
@@ -919,8 +1173,31 @@ export function App() {
               </button>
             </header>
 
-            <div className="editor-grid">
-              <section className="panel editor-panel">
+            <nav className="workspace-tabs" aria-label="메인 보기">
+              <button
+                type="button"
+                className={mainView === "write" ? "active" : ""}
+                onClick={() => setMainView("write")}
+              >
+                <FileText aria-hidden="true" size={15} />
+                작성
+              </button>
+              <button
+                type="button"
+                className={mainView === "diff" ? "active" : ""}
+                onClick={() => setMainView("diff")}
+              >
+                <Diff aria-hidden="true" size={15} />
+                Diff
+                <span className="tab-diff-summary">
+                  +{addedCount} -{removedCount}
+                </span>
+              </button>
+            </nav>
+
+            <div className="main-view">
+              {mainView === "write" ? (
+                <section className="panel editor-panel">
                 <div className="panel-heading">
                   <h3>작성</h3>
                   <span>
@@ -929,24 +1206,6 @@ export function App() {
                       ? ` / 결과 ${draftResultText.length.toLocaleString()}자`
                       : ""}
                   </span>
-                </div>
-                <div className="result-type-control" aria-label="결과 타입">
-                  <button
-                    type="button"
-                    className={`segment-button locked ${selectedTopicKind === "text" ? "active" : ""}`}
-                    tabIndex={-1}
-                  >
-                    <FileText aria-hidden="true" size={16} />
-                    텍스트 결과
-                  </button>
-                  <button
-                    type="button"
-                    className={`segment-button locked ${selectedTopicKind === "image" ? "active" : ""}`}
-                    tabIndex={-1}
-                  >
-                    <ImageIcon aria-hidden="true" size={16} />
-                    이미지 결과
-                  </button>
                 </div>
                 <label>
                   버전 이름
@@ -1048,8 +1307,8 @@ export function App() {
                   </div>
                 ) : null}
               </section>
-
-              <section className="panel diff-panel">
+              ) : (
+                <section className="panel diff-panel">
                 <div className="diff-titlebar">
                   <div className="editor-tab active">
                     <Diff aria-hidden="true" size={15} />
@@ -1091,103 +1350,9 @@ export function App() {
                   </div>
                 ) : null}
               </section>
+              )}
             </div>
 
-            <section className="history-panel">
-              <div className="history-header">
-                <div>
-                  <h3>
-                    <GitBranch aria-hidden="true" size={15} />
-                    {selectedTopic.title}
-                  </h3>
-                  <span>{topicVersions.length} commits</span>
-                </div>
-                {hasDraftChanges ? <span className="working-tree-badge">working tree</span> : null}
-              </div>
-              <div className="commit-graph" aria-label="저장 기록">
-                {activeVersionId === "draft" && hasDraftChanges ? (
-                  <article className="commit-row draft active">
-                    <div className="commit-rail">
-                      <span className="commit-line top-hidden" />
-                      <span className="commit-dot draft-dot" />
-                      <span className="commit-line" />
-                    </div>
-                    <div className="commit-content">
-                      <div className="commit-title-row">
-                        <button type="button" className="commit-title" onClick={() => setActiveVersionId("draft")}>
-                          작성 중
-                        </button>
-                        <span className="head-badge">HEAD</span>
-                      </div>
-                      <p>{selectedTopicKind === "text" ? draftResultText || draftBody : draftBody}</p>
-                    </div>
-                  </article>
-                ) : null}
-                {[...topicVersions].reverse().map((version, index, reversedVersions) => {
-                  const isActive = version.id === activeVersionId;
-                  const preview =
-                    selectedTopicKind === "text" ? getVersionResultText(version) : version.body;
-                  const shortHash = version.id.replace(/-/g, "").slice(0, 7);
-
-                  return (
-                    <article
-                      key={version.id}
-                      className={`commit-row ${isActive ? "active" : ""}`}
-                    >
-                      <div className="commit-rail">
-                        <span
-                          className={`commit-line ${
-                            index === 0 && !(activeVersionId === "draft" && hasDraftChanges)
-                              ? "top-hidden"
-                              : ""
-                          }`}
-                        />
-                        <span className="commit-dot">
-                          <GitCommitHorizontal aria-hidden="true" size={13} />
-                        </span>
-                        <span
-                          className={`commit-line ${
-                            index === reversedVersions.length - 1 ? "bottom-hidden" : ""
-                          }`}
-                        />
-                      </div>
-                      <div className="commit-content">
-                        <div className="commit-title-row">
-                          <button
-                            type="button"
-                            className="commit-title"
-                            onClick={() => setActiveVersionId(version.id)}
-                          >
-                            {version.label}
-                          </button>
-                          {isActive ? <span className="head-badge">HEAD</span> : null}
-                          <KindBadge kind={selectedTopicKind} />
-                        </div>
-                        <div className="commit-meta">
-                          <span>{shortHash}</span>
-                          <span>
-                            <Clock3 aria-hidden="true" size={13} />
-                            {formatDateTime(version.createdAt)}
-                          </span>
-                        </div>
-                        <p>{preview}</p>
-                        <div className="commit-actions">
-                          <button type="button" onClick={() => continueFromVersion(version)}>
-                            checkout
-                          </button>
-                          <button type="button" onClick={() => handleVersionDelete(version.id)}>
-                            delete
-                          </button>
-                        </div>
-                      </div>
-                    </article>
-                  );
-                })}
-                {topicVersions.length === 0 ? (
-                  <div className="empty-commit-log">아직 저장된 커밋이 없습니다.</div>
-                ) : null}
-              </div>
-            </section>
           </>
         ) : (
           <section className="empty-state">
@@ -1196,6 +1361,13 @@ export function App() {
           </section>
         )}
       </main>
+      <Toast toast={toast} onClose={() => setToast(null)} />
+      <ConfirmModal
+        dialog={confirmDialog}
+        busy={confirmBusy}
+        onCancel={closeConfirm}
+        onConfirm={confirmCurrentAction}
+      />
     </div>
   );
 }
