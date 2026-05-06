@@ -10,14 +10,36 @@ import type {
 } from "../types";
 import { getVersionKind, getVersionResultText } from "./promptVersions";
 
-const usdPerToken = (usdPerMillionTokens: number) =>
-  usdPerMillionTokens / 1_000_000;
+const tokensPerTenThousandUnit = 10_000;
+
+export const defaultInputTokenUnitInTenThousands = 100;
+
+export const getInputRateParts = (model: {
+  inputPriceUsd?: number;
+  inputTokenUnitInTenThousands?: number;
+}) => {
+  const hasDirectInputRate =
+    typeof model.inputPriceUsd === "number" &&
+    Number.isFinite(model.inputPriceUsd) &&
+    model.inputPriceUsd >= 0 &&
+    typeof model.inputTokenUnitInTenThousands === "number" &&
+    Number.isFinite(model.inputTokenUnitInTenThousands) &&
+    model.inputTokenUnitInTenThousands > 0;
+
+  return {
+    inputPriceUsd: hasDirectInputRate ? (model.inputPriceUsd ?? 0) : 0,
+    inputTokenUnitInTenThousands: hasDirectInputRate
+      ? (model.inputTokenUnitInTenThousands ?? defaultInputTokenUnitInTenThousands)
+      : defaultInputTokenUnitInTenThousands,
+  };
+};
 
 export const costEstimatorVersion = 1;
 export type CostCurrencyLocale = "ko" | "en";
 
 export type TopicModelOption = TopicModelConfig & {
   label: string;
+  selectionId: TopicModelId;
 };
 
 export type ModelCostItem = CostSnapshotModelItem;
@@ -29,28 +51,22 @@ type VersionBaseMetrics = Omit<
 
 const builtInModelConfigs: TopicModelConfig[] = [
   {
-    id: "xai/grok-4-1-fast-non-reasoning",
+    id: "grok-4-1-fast-non-reasoning",
     provider: "xAI",
     kind: "text",
     role: "chat-input",
     pricingType: "input",
-    inputUsdPerMillion: 0.2,
+    inputPriceUsd: 0.2,
+    inputTokenUnitInTenThousands: 100,
   },
   {
-    id: "openai/text-embedding-3-small",
+    id: "text-embedding-3-small",
     provider: "OpenAI",
     kind: "text",
     role: "embedding",
     pricingType: "input",
-    inputUsdPerMillion: 0.02,
-  },
-  {
-    id: "xai/grok-4-1-fast-non-reasoning",
-    provider: "xAI",
-    kind: "image",
-    role: "prompt-refiner",
-    pricingType: "input",
-    inputUsdPerMillion: 0.2,
+    inputPriceUsd: 0.02,
+    inputTokenUnitInTenThousands: 100,
   },
   {
     id: "fal-ai/bytedance/seedream/v4.5/edit",
@@ -63,12 +79,25 @@ const builtInModelConfigs: TopicModelConfig[] = [
 ];
 
 export const defaultModelIdsByKind: Record<PromptVersionKind, TopicModelId[]> = {
-  text: ["xai/grok-4-1-fast-non-reasoning", "openai/text-embedding-3-small"],
+  text: [
+    "text:grok-4-1-fast-non-reasoning",
+    "text:text-embedding-3-small",
+  ],
   image: [
-    "xai/grok-4-1-fast-non-reasoning",
-    "fal-ai/bytedance/seedream/v4.5/edit",
+    "text:grok-4-1-fast-non-reasoning",
+    "image:fal-ai/bytedance/seedream/v4.5/edit",
   ],
 };
+
+const legacyModelSelectionIdMap = new Map<TopicModelId, TopicModelId>([
+  ["text:xai/grok-4-1-fast-non-reasoning", "text:grok-4-1-fast-non-reasoning"],
+  ["xai/grok-4-1-fast-non-reasoning", "text:grok-4-1-fast-non-reasoning"],
+  ["text:openai/text-embedding-3-small", "text:text-embedding-3-small"],
+  ["openai/text-embedding-3-small", "text:text-embedding-3-small"],
+]);
+
+export const normalizeLegacyModelSelectionId = (modelId: TopicModelId) =>
+  legacyModelSelectionIdMap.get(modelId) ?? modelId;
 
 const isValidModelConfig = (model: TopicModelConfig) => {
   if (!model.id.trim() || !model.provider.trim()) {
@@ -80,8 +109,28 @@ const isValidModelConfig = (model: TopicModelConfig) => {
   }
 
   return (
-    typeof model.inputUsdPerMillion === "number" && model.inputUsdPerMillion >= 0
+    typeof model.inputPriceUsd === "number" &&
+    Number.isFinite(model.inputPriceUsd) &&
+    model.inputPriceUsd >= 0 &&
+    typeof model.inputTokenUnitInTenThousands === "number" &&
+    Number.isFinite(model.inputTokenUnitInTenThousands) &&
+    model.inputTokenUnitInTenThousands > 0
   );
+};
+
+export const getModelSelectionId = (model: Pick<TopicModelConfig, "id" | "kind">) =>
+  `${model.kind}:${model.id}`;
+
+const modelAppliesToTopicKind = (
+  topicKind: PromptVersionKind,
+  modelKind: TopicModelConfig["kind"],
+) => modelKind === "text" || modelKind === topicKind;
+
+export const modelKindOrder: Record<TopicModelConfig["kind"], number> = {
+  text: 0,
+  image: 1,
+  voice: 2,
+  video: 3,
 };
 
 export const getAvailableModelConfigs = (
@@ -89,20 +138,34 @@ export const getAvailableModelConfigs = (
   customModels: TopicModelConfig[] = [],
 ): TopicModelConfig[] => {
   const modelMap = new Map<TopicModelId, TopicModelConfig>();
+  const validCustomModels = customModels.filter(
+    (model) => modelAppliesToTopicKind(kind, model.kind) && isValidModelConfig(model),
+  );
+  const overriddenModelKeys = new Set(
+    validCustomModels
+      .map((model) =>
+        model.overridesModelKey
+          ? normalizeLegacyModelSelectionId(model.overridesModelKey)
+          : undefined,
+      )
+      .filter((modelKey): modelKey is TopicModelId => Boolean(modelKey)),
+  );
 
   for (const model of builtInModelConfigs) {
-    if (model.kind === kind) {
-      modelMap.set(model.id, model);
+    const modelKey = getModelSelectionId(model);
+
+    if (modelAppliesToTopicKind(kind, model.kind) && !overriddenModelKeys.has(modelKey)) {
+      modelMap.set(modelKey, model);
     }
   }
 
-  for (const model of customModels) {
-    if (model.kind === kind && isValidModelConfig(model)) {
-      modelMap.set(model.id, model);
-    }
+  for (const model of validCustomModels) {
+    modelMap.set(getModelSelectionId(model), model);
   }
 
-  return Array.from(modelMap.values());
+  return Array.from(modelMap.values()).sort(
+    (a, b) => modelKindOrder[a.kind] - modelKindOrder[b.kind],
+  );
 };
 
 export const resolveTopicModelIds = (
@@ -110,11 +173,40 @@ export const resolveTopicModelIds = (
   modelIds?: string[],
   customModels?: TopicModelConfig[],
 ): TopicModelId[] => {
+  const availableModels = getAvailableModelConfigs(kind, customModels);
   const availableModelIds = new Set(
-    getAvailableModelConfigs(kind, customModels).map((model) => model.id),
+    availableModels.map((model) => getModelSelectionId(model)),
   );
-  const normalizedModelIds = Array.from(new Set(modelIds ?? [])).filter((modelId) =>
-    availableModelIds.has(modelId),
+  const normalizedModelIds = Array.from(
+    new Set(
+      (modelIds ?? [])
+        .map((modelId) => {
+          const normalizedLegacyModelId = normalizeLegacyModelSelectionId(modelId);
+
+          if (availableModelIds.has(normalizedLegacyModelId)) {
+            return normalizedLegacyModelId;
+          }
+
+          const overrideMatch = availableModels.find(
+            (model) =>
+              model.overridesModelKey &&
+              normalizeLegacyModelSelectionId(model.overridesModelKey) ===
+                normalizedLegacyModelId,
+          );
+          if (overrideMatch) {
+            return getModelSelectionId(overrideMatch);
+          }
+
+          const legacyMatch = availableModels.find(
+            (model) =>
+              model.id === normalizedLegacyModelId ||
+              getModelSelectionId(model) === normalizedLegacyModelId,
+          );
+
+          return legacyMatch ? getModelSelectionId(legacyMatch) : null;
+        })
+        .filter((modelId): modelId is TopicModelId => Boolean(modelId)),
+    ),
   );
 
   return normalizedModelIds.length > 0 ? normalizedModelIds : defaultModelIdsByKind[kind];
@@ -126,7 +218,9 @@ export const resolveTopicModels = (
   customModels?: TopicModelConfig[],
 ): TopicModelConfig[] => {
   const availableModels = getAvailableModelConfigs(kind, customModels);
-  const availableModelMap = new Map(availableModels.map((model) => [model.id, model]));
+  const availableModelMap = new Map(
+    availableModels.map((model) => [getModelSelectionId(model), model]),
+  );
   const resolvedModelIds = resolveTopicModelIds(kind, modelIds, customModels);
 
   return resolvedModelIds
@@ -141,12 +235,11 @@ export const getModelOptions = (
   getAvailableModelConfigs(kind, customModels).map((model) => ({
     ...model,
     label: model.id,
+    selectionId: getModelSelectionId(model),
   }));
 
-export const getModelDisplayName = (modelId: string) => {
-  const slashIndex = modelId.indexOf("/");
-  return slashIndex >= 0 ? modelId.slice(slashIndex + 1) : modelId;
-};
+export const getModelDisplayName = (modelId: string) =>
+  modelId.includes(":") ? modelId.slice(modelId.indexOf(":") + 1) : modelId;
 
 export type VersionCostMetrics = {
   charDelta: number;
@@ -191,8 +284,20 @@ export const estimateTextTokens = (text: string) => {
   return Math.max(1, Math.ceil(weightedCharacters));
 };
 
-const estimateInputCost = (tokens: number, usdPerMillion: number) =>
-  tokens * usdPerToken(usdPerMillion);
+const estimateInputCost = (
+  tokens: number,
+  model: {
+    inputPriceUsd?: number;
+    inputTokenUnitInTenThousands?: number;
+  },
+) => {
+  const { inputPriceUsd, inputTokenUnitInTenThousands } =
+    getInputRateParts(model);
+  const pricedTokenCount =
+    inputTokenUnitInTenThousands * tokensPerTenThousandUnit;
+
+  return pricedTokenCount > 0 ? (tokens / pricedTokenCount) * inputPriceUsd : 0;
+};
 
 const formatTinyDecimal = (value: number) => {
   if (value >= 0.01) {
@@ -295,7 +400,7 @@ const buildModelCostItems = ({
   promptTokens: number;
 }) => {
   return models.flatMap<ModelCostItem>((model) => {
-    if (model.kind !== kind) {
+    if (!modelAppliesToTopicKind(kind, model.kind)) {
       return [];
     }
 
@@ -315,8 +420,10 @@ const buildModelCostItems = ({
 
     return [
       {
-        costUsd: estimateInputCost(promptTokens, model.inputUsdPerMillion ?? 0),
-        inputUsdPerMillion: model.inputUsdPerMillion ?? 0,
+        costUsd: estimateInputCost(promptTokens, model),
+        inputPriceUsd: getInputRateParts(model).inputPriceUsd,
+        inputTokenUnitInTenThousands:
+          getInputRateParts(model).inputTokenUnitInTenThousands,
         modelId: model.id,
         provider: model.provider,
         role: model.role,
@@ -407,7 +514,7 @@ const estimateVersionBaseMetrics = (
     inputTokens: promptTokens,
     kind,
     modelCostItems,
-    modelIds: models.map((model) => model.id),
+    modelIds: models.map((model) => getModelSelectionId(model)),
     outputCostUsd: 0,
     outputTokens: 0,
     promptChars,
@@ -505,7 +612,7 @@ export const estimateDraftCostMetrics = ({
     id: "draft",
     topicId: "draft",
     kind,
-    modelIds: resolvedModels.map((model) => model.id),
+    modelIds: resolvedModels.map((model) => getModelSelectionId(model)),
     label: "draft",
     body,
     resultText: kind === "text" ? resultText ?? "" : "",

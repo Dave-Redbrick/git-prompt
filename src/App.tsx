@@ -19,14 +19,17 @@ import {
   FolderPlus,
   GitBranch,
   ImageIcon,
+  Mic,
   Moon,
   PanelLeft,
+  Pencil,
   Plus,
   Save,
   Sparkles,
   Sun,
   Trash2,
   Upload,
+  Video,
   X,
 } from "lucide-react";
 import {
@@ -54,9 +57,12 @@ import {
   defaultModelIdsByKind,
   estimateDraftCostMetrics,
   formatCurrency,
+  getInputRateParts,
   getAvailableModelConfigs,
   getModelDisplayName,
   getModelOptions,
+  modelKindOrder,
+  normalizeLegacyModelSelectionId,
   resolveTopicModelIds,
 } from "./lib/costEstimator";
 import { diffLines } from "./lib/diff";
@@ -83,6 +89,7 @@ import type {
   Theme,
   TopicModelConfig,
   TopicModelId,
+  TopicModelKind,
   Topic,
 } from "./types";
 
@@ -169,6 +176,15 @@ const readAppearanceTheme = (): AppearanceTheme => {
 const isPromptVersionKind = (value: unknown): value is PromptVersionKind =>
   value === "text" || value === "image";
 
+const isTopicModelKind = (value: unknown): value is TopicModelKind =>
+  value === "text" ||
+  value === "image" ||
+  value === "voice" ||
+  value === "video";
+
+const getDefaultCustomModelPrice = (kind: TopicModelKind) =>
+  kind === "image" ? "0.04" : "0.20";
+
 const isTopicModelConfig = (value: unknown): value is TopicModelConfig => {
   if (!value || typeof value !== "object") {
     return false;
@@ -177,9 +193,12 @@ const isTopicModelConfig = (value: unknown): value is TopicModelConfig => {
   const model = value as Partial<TopicModelConfig>;
   const hasInputPrice =
     model.pricingType === "input" &&
-    typeof model.inputUsdPerMillion === "number" &&
-    Number.isFinite(model.inputUsdPerMillion) &&
-    model.inputUsdPerMillion >= 0;
+    typeof model.inputPriceUsd === "number" &&
+    Number.isFinite(model.inputPriceUsd) &&
+    model.inputPriceUsd >= 0 &&
+    typeof model.inputTokenUnitInTenThousands === "number" &&
+    Number.isFinite(model.inputTokenUnitInTenThousands) &&
+    model.inputTokenUnitInTenThousands > 0;
   const hasImagePrice =
     model.pricingType === "image" &&
     typeof model.costPerImageUsd === "number" &&
@@ -191,11 +210,13 @@ const isTopicModelConfig = (value: unknown): value is TopicModelConfig => {
     model.id.trim().length > 0 &&
     typeof model.provider === "string" &&
     model.provider.trim().length > 0 &&
-    isPromptVersionKind(model.kind) &&
+    isTopicModelKind(model.kind) &&
     (model.role === "chat-input" ||
       model.role === "embedding" ||
       model.role === "prompt-refiner" ||
-      model.role === "image-generation") &&
+      model.role === "image-generation" ||
+      model.role === "voice" ||
+      model.role === "video") &&
     (hasInputPrice || hasImagePrice)
   );
 };
@@ -204,10 +225,26 @@ const normalizeCustomModels = (models: TopicModelConfig[]) => {
   const modelMap = new Map<string, TopicModelConfig>();
 
   models.forEach((model) => {
-    modelMap.set(`${model.kind}:${model.id}`, {
+    const provider = model.provider.trim();
+    const id = model.id.trim();
+    const inputRate =
+      model.pricingType === "input" ? getInputRateParts(model) : null;
+
+    modelMap.set(`${model.kind}:${id}`, {
       ...model,
-      id: model.id.trim(),
-      provider: model.provider.trim(),
+      id,
+      provider,
+      memo: model.memo?.trim(),
+      overridesModelKey: model.overridesModelKey
+        ? normalizeLegacyModelSelectionId(model.overridesModelKey)
+        : undefined,
+      ...(inputRate
+        ? {
+            inputPriceUsd: inputRate.inputPriceUsd,
+            inputTokenUnitInTenThousands:
+              inputRate.inputTokenUnitInTenThousands,
+          }
+        : {}),
     });
   });
 
@@ -216,7 +253,9 @@ const normalizeCustomModels = (models: TopicModelConfig[]) => {
 
 const readCustomModels = (): TopicModelConfig[] => {
   try {
-    const parsed = JSON.parse(localStorage.getItem(customModelsKey) ?? "[]") as unknown;
+    const parsed = JSON.parse(
+      localStorage.getItem(customModelsKey) ?? "[]",
+    ) as unknown;
     const models = Array.isArray(parsed)
       ? parsed
       : Array.isArray((parsed as { models?: unknown }).models)
@@ -270,8 +309,8 @@ export function App() {
   const savedSelection = useMemo(readSelection, []);
   const projectImportInputRef = useRef<HTMLInputElement>(null);
   const customModelImportInputRef = useRef<HTMLInputElement>(null);
-  const [folderState, setFolderState] =
-    useState<FolderState>(readFolderState);
+  const customModelProviderPickerRef = useRef<HTMLDivElement>(null);
+  const [folderState, setFolderState] = useState<FolderState>(readFolderState);
   const [appearanceTheme, setAppearanceTheme] =
     useState<AppearanceTheme>(readAppearanceTheme);
   const [locale, setLocale] = useState<Locale>(readLocale);
@@ -300,9 +339,8 @@ export function App() {
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
   const [customModels, setCustomModels] =
     useState<TopicModelConfig[]>(readCustomModels);
-  const [showCustomModelForm, setShowCustomModelForm] = useState(false);
   const [customModelKind, setCustomModelKind] =
-    useState<PromptVersionKind>("text");
+    useState<TopicModelKind>("text");
 
   const [newProjectName, setNewProjectName] = useState("");
   const [newThemeName, setNewThemeName] = useState("");
@@ -314,11 +352,18 @@ export function App() {
     defaultModelIdsByKind.text,
   );
   const [customModelProvider, setCustomModelProvider] = useState("xAI");
+  const [customModelProviderDraft, setCustomModelProviderDraft] = useState("");
+  const [customModelProviderOpen, setCustomModelProviderOpen] = useState(false);
   const [customModelId, setCustomModelId] = useState("");
-  const [customModelPricingType, setCustomModelPricingType] = useState<
-    "input" | "image"
-  >("input");
-  const [customModelPrice, setCustomModelPrice] = useState("");
+  const [customModelMemo, setCustomModelMemo] = useState("");
+  const [customModelPrice, setCustomModelPrice] = useState(
+    getDefaultCustomModelPrice("text"),
+  );
+  const [editingModelKey, setEditingModelKey] = useState<string | null>(null);
+  const [
+    customModelTokenUnitInTenThousands,
+    setCustomModelTokenUnitInTenThousands,
+  ] = useState("100");
 
   const [draftKind, setDraftKind] = useState<PromptVersionKind>("text");
   const [draftLabel, setDraftLabel] = useState("");
@@ -337,6 +382,84 @@ export function App() {
   const requestConfirm = (dialog: ConfirmDialogState) => {
     setConfirmDialog(dialog);
   };
+
+  const selectCustomModelKind = (kind: TopicModelKind) => {
+    setCustomModelKind((previousKind) => {
+      setCustomModelPrice((currentPrice) => {
+        const trimmedPrice = currentPrice.trim();
+        const previousDefaultPrice = getDefaultCustomModelPrice(previousKind);
+
+        return trimmedPrice === "" || trimmedPrice === previousDefaultPrice
+          ? getDefaultCustomModelPrice(kind)
+          : currentPrice;
+      });
+
+      return kind;
+    });
+  };
+
+  const resetCustomModelForm = (kind = customModelKind) => {
+    setEditingModelKey(null);
+    setCustomModelProvider("xAI");
+    setCustomModelProviderDraft("");
+    setCustomModelProviderOpen(false);
+    setCustomModelId("");
+    setCustomModelMemo("");
+    setCustomModelPrice(getDefaultCustomModelPrice(kind));
+    setCustomModelTokenUnitInTenThousands("100");
+  };
+
+  const startModelEdit = (model: TopicModelConfig) => {
+    const inputRate =
+      model.pricingType === "input" ? getInputRateParts(model) : null;
+
+    setEditingModelKey(`${model.kind}:${model.id}`);
+    setCustomModelKind(model.kind);
+    setCustomModelProvider(model.provider);
+    setCustomModelProviderDraft("");
+    setCustomModelProviderOpen(false);
+    setCustomModelId(model.id);
+    setCustomModelMemo(model.memo ?? "");
+    setCustomModelPrice(
+      model.pricingType === "image"
+        ? String(model.costPerImageUsd ?? getDefaultCustomModelPrice("image"))
+        : String(
+            inputRate?.inputPriceUsd ?? getDefaultCustomModelPrice(model.kind),
+          ),
+    );
+    setCustomModelTokenUnitInTenThousands(
+      String(inputRate?.inputTokenUnitInTenThousands ?? 100),
+    );
+  };
+
+  useEffect(() => {
+    const parsedPrice = Number(customModelPrice);
+
+    if (
+      customModelPrice.trim() !== "" &&
+      Number.isFinite(parsedPrice) &&
+      parsedPrice > 0 &&
+      parsedPrice < 0.001
+    ) {
+      setCustomModelPrice(getDefaultCustomModelPrice(customModelKind));
+    }
+  }, [customModelKind, customModelPrice]);
+
+  useEffect(() => {
+    if (!customModelProviderOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!customModelProviderPickerRef.current?.contains(event.target as Node)) {
+        setCustomModelProviderOpen(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [customModelProviderOpen]);
 
   const closeConfirm = () => {
     if (!confirmBusy) {
@@ -549,14 +672,20 @@ export function App() {
       (topic) => topic.projectId === projectId && topic.themeId === themeId,
     );
     const savedTopicId = folderState.themeTopicIds[themeId];
-    return topics.find((topic) => topic.id === savedTopicId)?.id ?? topics[0]?.id ?? "";
+    return (
+      topics.find((topic) => topic.id === savedTopicId)?.id ??
+      topics[0]?.id ??
+      ""
+    );
   };
 
   const getOpenPathForProject = (
     projectId: string,
     source: Pick<StoreState, "themes" | "topics"> = store,
   ): Pick<Selection, "themeId" | "topicId"> => {
-    const themes = source.themes.filter((theme) => theme.projectId === projectId);
+    const themes = source.themes.filter(
+      (theme) => theme.projectId === projectId,
+    );
     const savedThemeId = folderState.projectThemeIds[projectId];
     const theme =
       themes.find((item) => item.id === savedThemeId) ?? themes[0] ?? null;
@@ -646,7 +775,10 @@ export function App() {
     }
 
     if (!selectedTopicId || !selectedTopic) {
-      const topicId = getOpenTopicIdForTheme(selectedProjectId, selectedThemeId);
+      const topicId = getOpenTopicIdForTheme(
+        selectedProjectId,
+        selectedThemeId,
+      );
       if (selectedTopicId !== topicId) {
         setSelectedTopicId(topicId);
       }
@@ -702,7 +834,8 @@ export function App() {
         projectThemeIds[selectedProjectId];
       const themeTopicUnchanged =
         !selectedThemeId ||
-        current.themeTopicIds[selectedThemeId] === themeTopicIds[selectedThemeId];
+        current.themeTopicIds[selectedThemeId] ===
+          themeTopicIds[selectedThemeId];
 
       if (projectThemeUnchanged && themeTopicUnchanged) {
         return current;
@@ -1111,44 +1244,77 @@ export function App() {
       return;
     }
 
-    const pricingType =
-      customModelKind === "text" ? "input" : customModelPricingType;
+    const pricingType = customModelKind === "image" ? "image" : "input";
+    const tokenUnitInTenThousands = Number(customModelTokenUnitInTenThousands);
+    if (
+      pricingType === "input" &&
+      (!Number.isFinite(tokenUnitInTenThousands) ||
+        tokenUnitInTenThousands <= 0)
+    ) {
+      showToast(ui.modelTokenUnitInvalid, "error");
+      return;
+    }
+
+    const editingModel = editingModelKey
+      ? customModels.find(
+          (item) => `${item.kind}:${item.id}` === editingModelKey,
+        )
+      : null;
+    const overrideModelKey = editingModelKey
+      ? (editingModel?.overridesModelKey ?? editingModelKey)
+      : null;
     const model: TopicModelConfig = {
       id,
       provider,
       kind: customModelKind,
+      memo: customModelMemo.trim(),
       role:
-        pricingType === "image"
+        customModelKind === "image"
           ? "image-generation"
-          : customModelKind === "image"
-            ? "prompt-refiner"
-            : id.toLowerCase().includes("embedding")
-              ? "embedding"
+          : customModelKind === "voice"
+            ? "voice"
+            : customModelKind === "video"
+              ? "video"
               : "chat-input",
       pricingType,
+      ...(overrideModelKey ? { overridesModelKey: overrideModelKey } : {}),
       ...(pricingType === "image"
         ? { costPerImageUsd: price }
-        : { inputUsdPerMillion: price }),
+        : {
+            inputPriceUsd: price,
+            inputTokenUnitInTenThousands: tokenUnitInTenThousands,
+          }),
     };
+
+    const nextModelKey = `${customModelKind}:${id}`;
 
     setCustomModels((current) =>
       normalizeCustomModels([
-        ...current.filter(
-          (item) => !(item.kind === customModelKind && item.id === id),
-        ),
+        ...current.filter((item) => {
+          const itemKey = `${item.kind}:${item.id}`;
+
+          return itemKey !== nextModelKey && itemKey !== editingModelKey;
+        }),
         model,
       ]),
     );
-    setCustomModelId("");
-    setCustomModelPrice("");
-    setShowCustomModelForm(false);
-    showToast(ui.modelSaved);
+    resetCustomModelForm(customModelKind);
+    showToast(editingModelKey ? ui.modelUpdated : ui.modelSaved);
   };
 
-  const handleCustomModelDelete = (model: TopicModelConfig) => {
+  const handleCustomModelDelete = (
+    modelOrModels: TopicModelConfig | TopicModelConfig[],
+  ) => {
+    const modelsToDelete = Array.isArray(modelOrModels)
+      ? modelOrModels
+      : [modelOrModels];
+
     setCustomModels((current) =>
       current.filter(
-        (item) => !(item.kind === model.kind && item.id === model.id),
+        (item) =>
+          !modelsToDelete.some(
+            (model) => item.kind === model.kind && item.id === model.id,
+          ),
       ),
     );
     showToast(ui.modelDeleted);
@@ -1176,7 +1342,9 @@ export function App() {
     showToast(ui.modelsExported);
   };
 
-  const handleCustomModelsImport = async (event: ChangeEvent<HTMLInputElement>) => {
+  const handleCustomModelsImport = async (
+    event: ChangeEvent<HTMLInputElement>,
+  ) => {
     const file = event.target.files?.[0];
     if (!file) {
       return;
@@ -1517,61 +1685,117 @@ export function App() {
 
   const selectedTopicModelOptions = selectedTopic
     ? getModelOptions(selectedTopicKind, customModels).map((option) => ({
-        description: ui.modelRole(option.role),
+        description: [option.provider, option.memo].filter(Boolean).join(" · "),
         displayLabel: getModelDisplayName(option.id),
-        group: option.provider,
-        id: option.id,
+        group: ui.modelUse(option.kind),
+        id: option.selectionId,
         label: option.label,
       }))
     : [];
-  const effectiveCustomModelPricingType =
-    customModelKind === "text" ? "input" : customModelPricingType;
+  const isCustomModelImage = customModelKind === "image";
+  const customModelPricePlaceholder = isCustomModelImage
+    ? ui.imageUsdPlaceholder
+    : ui.usdAmountPlaceholder;
   const customModelKeySet = new Set(
     customModels.map((model) => `${model.kind}:${model.id}`),
   );
+  const customModelOverrideKeySet = new Set(
+    customModels
+      .map((model) =>
+        model.overridesModelKey
+          ? normalizeLegacyModelSelectionId(model.overridesModelKey)
+          : undefined,
+      )
+      .filter((modelKey): modelKey is TopicModelId => Boolean(modelKey)),
+  );
   const builtInLibraryModels = [
-    ...getAvailableModelConfigs("text"),
-    ...getAvailableModelConfigs("image"),
+    ...getAvailableModelConfigs("text").filter(
+      (model) => model.kind === "text",
+    ),
+    ...getAvailableModelConfigs("image").filter(
+      (model) => model.kind === "image",
+    ),
   ];
-  const modelLibraryItems: Array<{
+  type ModelLibrarySource = "builtin" | "custom";
+  type ModelLibraryItem = {
     model: TopicModelConfig;
-    source: "builtin" | "custom";
-  }> = [
+    source: ModelLibrarySource;
+  };
+  const modelLibraryItems: ModelLibraryItem[] = [
     ...builtInLibraryModels
-      .filter((model) => !customModelKeySet.has(`${model.kind}:${model.id}`))
+      .filter(
+        (model) =>
+          !customModelKeySet.has(`${model.kind}:${model.id}`) &&
+          !customModelOverrideKeySet.has(`${model.kind}:${model.id}`),
+      )
       .map((model) => ({ model, source: "builtin" as const })),
     ...customModels.map((model) => ({ model, source: "custom" as const })),
-  ];
+  ].sort(
+    (a, b) =>
+      modelKindOrder[a.model.kind] - modelKindOrder[b.model.kind] ||
+      a.model.provider.localeCompare(b.model.provider) ||
+      a.model.id.localeCompare(b.model.id),
+  );
   const modelLibraryGroups: Array<{
-    provider: string;
-    items: typeof modelLibraryItems;
+    kind: TopicModelKind;
+    items: ModelLibraryItem[];
   }> = [];
   modelLibraryItems.forEach((item) => {
     const group = modelLibraryGroups.find(
-      (groupItem) => groupItem.provider === item.model.provider,
+      (groupItem) => groupItem.kind === item.model.kind,
     );
     if (group) {
       group.items.push(item);
       return;
     }
-    modelLibraryGroups.push({ provider: item.model.provider, items: [item] });
+    modelLibraryGroups.push({ kind: item.model.kind, items: [item] });
   });
-  const modelUnitPrice = (model: TopicModelConfig) =>
-    model.pricingType === "image"
-      ? ui.imageRate(
-          formatCurrency(
-            model.costPerImageUsd ?? 0,
-            locale,
-            usdKrwExchangeRate?.rate ?? null,
-          ),
-        )
-      : ui.modelRate(
-          formatCurrency(
-            model.inputUsdPerMillion ?? 0,
-            locale,
-            usdKrwExchangeRate?.rate ?? null,
-          ),
-        );
+  const modelUnitPrice = (model: TopicModelConfig) => {
+    if (model.pricingType === "image") {
+      return ui.imageRate(
+        formatCurrency(
+          model.costPerImageUsd ?? 0,
+          locale,
+          usdKrwExchangeRate?.rate ?? null,
+        ),
+      );
+    }
+
+    const inputRate = getInputRateParts(model);
+
+    return ui.modelRate(
+      formatCurrency(
+        inputRate.inputPriceUsd,
+        locale,
+        usdKrwExchangeRate?.rate ?? null,
+      ),
+      inputRate.inputTokenUnitInTenThousands.toLocaleString(),
+    );
+  };
+
+  const modelProviderOptions = Array.from(
+    new Set(
+      [
+        ...builtInLibraryModels.map((model) => model.provider),
+        ...customModels.map((model) => model.provider),
+        customModelProvider,
+      ]
+        .map((provider) => provider.trim())
+        .filter(Boolean),
+    ),
+  ).sort((a, b) => a.localeCompare(b));
+
+  const commitCustomModelProvider = (provider: string) => {
+    const trimmedProvider = provider.trim();
+
+    if (!trimmedProvider) {
+      return;
+    }
+
+    setCustomModelProvider(trimmedProvider);
+    setCustomModelProviderDraft("");
+    setCustomModelProviderOpen(false);
+  };
 
   const historySidebar = (
     <div className="history-pane">
@@ -1603,16 +1827,20 @@ export function App() {
   const modelsSidebar = (
     <div className="models-pane">
       <section className="models-toolbar">
-        <button
-          type="button"
-          className="model-add-button"
-          onClick={() => setShowCustomModelForm((current) => !current)}
-          aria-label={ui.addModel}
-          title={ui.addModel}
-        >
-          <Plus aria-hidden="true" size={13} />
-          <span>{ui.addModel}</span>
-        </button>
+        <span className="models-toolbar-title">
+          <span>{editingModelKey ? ui.modelEditMode : ui.addModel}</span>
+          {editingModelKey ? (
+            <button
+              type="button"
+              className="mini-icon-button"
+              onClick={() => resetCustomModelForm()}
+              aria-label={ui.modelEditCancel}
+              title={ui.modelEditCancel}
+            >
+              <X aria-hidden="true" size={13} />
+            </button>
+          ) : null}
+        </span>
         <div className="models-toolbar-actions">
           <button
             type="button"
@@ -1643,90 +1871,172 @@ export function App() {
         </div>
       </section>
 
-      {showCustomModelForm ? (
-        <form
-          className="custom-model-form model-library-form"
-          onSubmit={handleCustomModelAdd}
+      <form
+        className="custom-model-form model-library-form"
+        onSubmit={handleCustomModelAdd}
+      >
+        <div
+          className="result-type-control compact-kind-control model-kind-toggle"
+          aria-label={ui.modelKind}
         >
-          <div
-            className="result-type-control compact-kind-control model-kind-toggle"
-            aria-label={ui.modelKind}
+          <button
+            type="button"
+            className={`segment-button ${customModelKind === "text" ? "active" : ""}`}
+            onClick={() => selectCustomModelKind("text")}
+            disabled={Boolean(editingModelKey)}
           >
+            <FileText aria-hidden="true" size={14} />
+            {ui.text}
+          </button>
+          <button
+            type="button"
+            className={`segment-button ${customModelKind === "image" ? "active" : ""}`}
+            onClick={() => selectCustomModelKind("image")}
+            disabled={Boolean(editingModelKey)}
+          >
+            <ImageIcon aria-hidden="true" size={14} />
+            {ui.image}
+          </button>
+          <button
+            type="button"
+            className={`segment-button ${customModelKind === "voice" ? "active" : ""}`}
+            onClick={() => selectCustomModelKind("voice")}
+            disabled={Boolean(editingModelKey)}
+          >
+            <Mic aria-hidden="true" size={14} />
+            {ui.voice}
+          </button>
+          <button
+            type="button"
+            className={`segment-button ${customModelKind === "video" ? "active" : ""}`}
+            onClick={() => selectCustomModelKind("video")}
+            disabled={Boolean(editingModelKey)}
+          >
+            <Video aria-hidden="true" size={14} />
+            {ui.video}
+          </button>
+        </div>
+        <div className="custom-model-fields">
+          <div className="model-provider-picker" ref={customModelProviderPickerRef}>
             <button
               type="button"
-              className={`segment-button ${customModelKind === "text" ? "active" : ""}`}
-              onClick={() => {
-                setCustomModelKind("text");
-                setCustomModelPricingType("input");
-              }}
+              className={`model-provider-trigger ${customModelProviderOpen ? "open" : ""}`}
+              onClick={() => setCustomModelProviderOpen((current) => !current)}
+              aria-expanded={customModelProviderOpen}
+              aria-label={ui.modelProviderPlaceholder}
             >
-              <FileText aria-hidden="true" size={14} />
-              {ui.text}
+              <span>{customModelProvider || ui.modelProviderPlaceholder}</span>
+              <ChevronDown aria-hidden="true" size={14} />
             </button>
-            <button
-              type="button"
-              className={`segment-button ${customModelKind === "image" ? "active" : ""}`}
-              onClick={() => setCustomModelKind("image")}
-            >
-              <ImageIcon aria-hidden="true" size={14} />
-              {ui.image}
-            </button>
+            {customModelProviderOpen ? (
+              <div className="model-provider-popover">
+                <div className="model-provider-options">
+                  {modelProviderOptions.map((provider) => (
+                    <button
+                      type="button"
+                      key={provider}
+                      className={provider === customModelProvider ? "active" : ""}
+                      onClick={() => commitCustomModelProvider(provider)}
+                    >
+                      {provider}
+                    </button>
+                  ))}
+                </div>
+                <div className="model-provider-add-row">
+                  <input
+                    value={customModelProviderDraft}
+                    onChange={(event) =>
+                      setCustomModelProviderDraft(event.target.value)
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        commitCustomModelProvider(customModelProviderDraft);
+                      }
+                    }}
+                    placeholder={ui.modelProviderPlaceholder}
+                  />
+                  <button
+                    type="button"
+                    className="primary-small-button"
+                    onClick={() => commitCustomModelProvider(customModelProviderDraft)}
+                  >
+                    {ui.add}
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
-          <div className="custom-model-fields">
-            <input
-              value={customModelProvider}
-              onChange={(event) => setCustomModelProvider(event.target.value)}
-              placeholder={ui.modelProviderPlaceholder}
-            />
-            <input
-              value={customModelId}
-              onChange={(event) => setCustomModelId(event.target.value)}
-              placeholder={ui.modelIdPlaceholder}
-            />
-          </div>
-          {customModelKind === "image" ? (
-            <div className="result-type-control compact-kind-control model-price-toggle">
-              <button
-                type="button"
-                className={`segment-button ${effectiveCustomModelPricingType === "input" ? "active" : ""}`}
-                onClick={() => setCustomModelPricingType("input")}
-              >
-                {ui.modelRole("prompt-refiner")}
-              </button>
-              <button
-                type="button"
-                className={`segment-button ${effectiveCustomModelPricingType === "image" ? "active" : ""}`}
-                onClick={() => setCustomModelPricingType("image")}
-              >
-                {ui.modelRole("image-generation")}
-              </button>
+          <input
+            value={customModelId}
+            onChange={(event) => setCustomModelId(event.target.value)}
+            placeholder={ui.modelIdPlaceholder}
+          />
+        </div>
+        <textarea
+          value={customModelMemo}
+          onChange={(event) => setCustomModelMemo(event.target.value)}
+          placeholder={ui.modelMemoPlaceholder}
+          rows={2}
+        />
+        <div className="custom-model-submit-row">
+          {isCustomModelImage ? (
+            <div className="custom-model-rate-field image-rate">
+              <label className="custom-model-rate-box">
+                <span>$</span>
+                <input
+                  aria-label={ui.usdAmountPlaceholder}
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={customModelPrice}
+                  onChange={(event) => setCustomModelPrice(event.target.value)}
+                  placeholder="0.04"
+                />
+              </label>
             </div>
-          ) : null}
-          <div className="custom-model-submit-row">
-            <input
-              type="number"
-              min="0"
-              step="0.000001"
-              value={customModelPrice}
-              onChange={(event) => setCustomModelPrice(event.target.value)}
-              placeholder={
-                effectiveCustomModelPricingType === "image"
-                  ? ui.imageUsdPlaceholder
-                  : ui.inputUsdPerMillionPlaceholder
-              }
-            />
-            <button type="submit" className="primary-small-button">
-              {ui.addCustomModel}
-            </button>
-          </div>
-        </form>
-      ) : null}
+          ) : (
+            <div className="custom-model-rate-field">
+              <label className="custom-model-rate-box">
+                <span>$</span>
+                <input
+                  aria-label={ui.usdAmountPlaceholder}
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={customModelPrice}
+                  onChange={(event) => setCustomModelPrice(event.target.value)}
+                  placeholder="0.20"
+                />
+              </label>
+              <span className="custom-model-rate-divider">/</span>
+              <label className="custom-model-rate-box token-unit">
+                <input
+                  aria-label={ui.tokenUnitTenThousandAria}
+                  type="number"
+                  min="1"
+                  step="any"
+                  value={customModelTokenUnitInTenThousands}
+                  onChange={(event) =>
+                    setCustomModelTokenUnitInTenThousands(event.target.value)
+                  }
+                  placeholder="100"
+                />
+                <span>{ui.tokenUnitTenThousandLabel}</span>
+              </label>
+            </div>
+          )}
+          <button type="submit" className="primary-small-button">
+            {editingModelKey ? ui.saveModelEdit : ui.addCustomModel}
+          </button>
+        </div>
+      </form>
 
       <div className="model-library-list">
         {modelLibraryGroups.map((group) => (
-          <section className="model-library-section" key={group.provider}>
+          <section className="model-library-section" key={group.kind}>
             <div className="model-library-provider">
-              <span>{group.provider}</span>
+              <span>{ui.modelUse(group.kind)}</span>
               <small>{group.items.length}</small>
             </div>
             <div className="model-library-rows">
@@ -1737,16 +2047,27 @@ export function App() {
                 >
                   <div className="model-library-main">
                     <span className="model-library-meta">
-                      <span>{model.kind === "text" ? ui.text : ui.image}</span>
-                      <span>{ui.modelRole(model.role)}</span>
+                      <span>{model.provider}</span>
+                      {model.memo ? <span>{model.memo}</span> : null}
                       <span className={`model-source-badge ${source}`}>
                         {source === "builtin" ? ui.builtInModel : ui.userModel}
                       </span>
                     </span>
-                    <code title={model.id}>{getModelDisplayName(model.id)}</code>
+                    <code title={model.id}>
+                      {getModelDisplayName(model.id)}
+                    </code>
                   </div>
                   <div className="model-library-side">
                     <span>{modelUnitPrice(model)}</span>
+                    <button
+                      type="button"
+                      className="model-library-edit-button"
+                      onClick={() => startModelEdit(model)}
+                      aria-label={ui.modelEditTitle(model.id)}
+                      title={ui.modelEditTitle(model.id)}
+                    >
+                      <Pencil aria-hidden="true" size={14} />
+                    </button>
                     {source === "custom" ? (
                       <button
                         type="button"
@@ -1970,273 +2291,285 @@ export function App() {
 
             {selectedProject ? (
               <section className="sidebar-section">
-              <div className="section-title">
-                <span className="section-title-label">
-                  <ChevronDown aria-hidden="true" size={13} />
-                  {ui.themesSection}
-                  <small>{projectThemes.length}</small>
-                </span>
-                <button
-                  type="button"
-                  className="mini-icon-button"
-                  onClick={() =>
-                    setCreatePanel(createPanel === "theme" ? null : "theme")
-                  }
-                  aria-label={ui.addTheme}
-                >
-                  <Plus aria-hidden="true" size={15} />
-                </button>
-              </div>
-              <div className="theme-list">
-                {projectThemes.map((theme) => {
-                  const isRenaming =
-                    renameTarget?.kind === "theme" &&
-                    renameTarget.id === theme.id;
-                  const ThemeIcon =
-                    theme.id === selectedThemeId ? FolderOpen : Folder;
+                <div className="section-title">
+                  <span className="section-title-label">
+                    <ChevronDown aria-hidden="true" size={13} />
+                    {ui.themesSection}
+                    <small>{projectThemes.length}</small>
+                  </span>
+                  <button
+                    type="button"
+                    className="mini-icon-button"
+                    onClick={() =>
+                      setCreatePanel(createPanel === "theme" ? null : "theme")
+                    }
+                    aria-label={ui.addTheme}
+                  >
+                    <Plus aria-hidden="true" size={15} />
+                  </button>
+                </div>
+                <div className="theme-list">
+                  {projectThemes.map((theme) => {
+                    const isRenaming =
+                      renameTarget?.kind === "theme" &&
+                      renameTarget.id === theme.id;
+                    const ThemeIcon =
+                      theme.id === selectedThemeId ? FolderOpen : Folder;
 
-                  return (
-                    <TreeRow
-                      key={theme.id}
-                      kind="theme"
-                      active={theme.id === selectedThemeId}
-                      count={topicCountByTheme[theme.id] ?? 0}
-                      deleteLabel={ui.deleteThemeAria(theme.name)}
-                      icon={
-                        <ThemeIcon
-                          aria-hidden="true"
-                          className="theme-folder-icon"
-                          size={15}
-                          style={{ color: theme.color }}
-                        />
-                      }
-                      name={theme.name}
-                      renaming={isRenaming}
-                      renameValue={renameTarget?.value}
-                      onClick={() => openThemePath(theme.id)}
-                      onDelete={() => handleThemeDelete(theme)}
-                      onDoubleClick={() =>
-                        startRename({
-                          kind: "theme",
-                          id: theme.id,
-                          value: theme.name,
-                        })
-                      }
-                      onRenameCancel={cancelRename}
-                      onRenameChange={updateRenameValue}
-                      onRenameCommit={() => void commitRename()}
-                    />
-                  );
-                })}
-              </div>
-              {createPanel === "theme" ? (
-                <form
-                  className="create-form create-panel"
-                  onSubmit={handleThemeCreate}
-                >
-                  <div className="create-panel-header">
-                    <span>{ui.newTheme}</span>
-                    <button
-                      type="button"
-                      className="mini-icon-button"
-                      onClick={() => setCreatePanel(null)}
-                      aria-label={ui.close}
-                    >
-                      <X aria-hidden="true" size={14} />
-                    </button>
-                  </div>
-                  <label className="create-field">
-                    <span>{ui.name}</span>
-                    <input
-                      value={newThemeName}
-                      onChange={(event) => setNewThemeName(event.target.value)}
-                      placeholder={ui.themeNamePlaceholder}
-                    />
-                  </label>
-                  <div className="create-field">
-                    <span>{ui.color}</span>
-                    <div className="color-row">
-                      {themeColors.map((color) => (
-                        <button
-                          key={color}
-                          type="button"
-                          className={`color-dot ${newThemeColor === color ? "selected" : ""}`}
-                          style={{ backgroundColor: color }}
-                          onClick={() => setNewThemeColor(color)}
-                          aria-label={ui.colorAria(color)}
-                        />
-                      ))}
+                    return (
+                      <TreeRow
+                        key={theme.id}
+                        kind="theme"
+                        active={theme.id === selectedThemeId}
+                        count={topicCountByTheme[theme.id] ?? 0}
+                        deleteLabel={ui.deleteThemeAria(theme.name)}
+                        icon={
+                          <ThemeIcon
+                            aria-hidden="true"
+                            className="theme-folder-icon"
+                            size={15}
+                            style={{ color: theme.color }}
+                          />
+                        }
+                        name={theme.name}
+                        renaming={isRenaming}
+                        renameValue={renameTarget?.value}
+                        onClick={() => openThemePath(theme.id)}
+                        onDelete={() => handleThemeDelete(theme)}
+                        onDoubleClick={() =>
+                          startRename({
+                            kind: "theme",
+                            id: theme.id,
+                            value: theme.name,
+                          })
+                        }
+                        onRenameCancel={cancelRename}
+                        onRenameChange={updateRenameValue}
+                        onRenameCommit={() => void commitRename()}
+                      />
+                    );
+                  })}
+                </div>
+                {createPanel === "theme" ? (
+                  <form
+                    className="create-form create-panel"
+                    onSubmit={handleThemeCreate}
+                  >
+                    <div className="create-panel-header">
+                      <span>{ui.newTheme}</span>
+                      <button
+                        type="button"
+                        className="mini-icon-button"
+                        onClick={() => setCreatePanel(null)}
+                        aria-label={ui.close}
+                      >
+                        <X aria-hidden="true" size={14} />
+                      </button>
                     </div>
-                  </div>
-                  <div className="create-actions">
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      onClick={() => setCreatePanel(null)}
-                    >
-                      {ui.cancel}
-                    </button>
-                    <button type="submit" className="primary-small-button">
-                      {ui.add}
-                    </button>
-                  </div>
-                </form>
-              ) : null}
+                    <label className="create-field">
+                      <span>{ui.name}</span>
+                      <input
+                        value={newThemeName}
+                        onChange={(event) =>
+                          setNewThemeName(event.target.value)
+                        }
+                        placeholder={ui.themeNamePlaceholder}
+                      />
+                    </label>
+                    <div className="create-field">
+                      <span>{ui.color}</span>
+                      <div className="color-row">
+                        {themeColors.map((color) => (
+                          <button
+                            key={color}
+                            type="button"
+                            className={`color-dot ${newThemeColor === color ? "selected" : ""}`}
+                            style={{ backgroundColor: color }}
+                            onClick={() => setNewThemeColor(color)}
+                            aria-label={ui.colorAria(color)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                    <div className="create-actions">
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() => setCreatePanel(null)}
+                      >
+                        {ui.cancel}
+                      </button>
+                      <button type="submit" className="primary-small-button">
+                        {ui.add}
+                      </button>
+                    </div>
+                  </form>
+                ) : null}
               </section>
             ) : null}
 
             {selectedTheme ? (
               <section className="sidebar-section topic-section">
-              <div className="section-title">
-                <span className="section-title-label">
-                  <ChevronDown aria-hidden="true" size={13} />
-                  {ui.topicsSection}
-                  <small>{themeTopics.length}</small>
-                </span>
-                <button
-                  type="button"
-                  className="mini-icon-button"
-                  onClick={() =>
-                    setCreatePanel(createPanel === "topic" ? null : "topic")
-                  }
-                  aria-label={ui.addTopic}
-                >
-                  <Plus aria-hidden="true" size={15} />
-                </button>
-              </div>
-              <div className="topic-list">
-                {themeTopics.map((topic) => {
-                  const count = store.versions.filter(
-                    (version) => version.topicId === topic.id,
-                  ).length;
-                  const isRenaming =
-                    renameTarget?.kind === "topic" &&
-                    renameTarget.id === topic.id;
-                  const TopicIcon =
-                    getTopicKind(topic) === "image" ? FileImage : FileText;
-                  return (
-                    <TreeRow
-                      key={topic.id}
-                      kind="topic"
-                      active={topic.id === selectedTopicId}
-                      count={count}
-                      deleteLabel={ui.deleteTopicAria(topic.title)}
-                      icon={<TopicIcon aria-hidden="true" size={15} />}
-                      name={topic.title}
-                      renaming={isRenaming}
-                      renameValue={renameTarget?.value}
-                      onClick={() => {
-                        setSelectedTopicId(topic.id);
-                        setCreatePanel(null);
-                      }}
-                      onDelete={() => handleTopicDelete(topic)}
-                      onDoubleClick={() =>
-                        startRename({
-                          kind: "topic",
-                          id: topic.id,
-                          value: topic.title,
-                        })
-                      }
-                      onRenameCancel={cancelRename}
-                      onRenameChange={updateRenameValue}
-                      onRenameCommit={() => void commitRename()}
-                    />
-                  );
-                })}
-              </div>
-              {createPanel === "topic" ? (
-                <form
-                  className="create-form create-panel"
-                  onSubmit={handleTopicCreate}
-                >
-                  <div className="create-panel-header">
-                    <span>{ui.newTopic}</span>
-                    <button
-                      type="button"
-                      className="mini-icon-button"
-                      onClick={() => setCreatePanel(null)}
-                      aria-label={ui.close}
-                    >
-                      <X aria-hidden="true" size={14} />
-                    </button>
-                  </div>
-                  <div className="create-field">
-                    <span>{ui.result}</span>
-                    <div
-                      className="result-type-control compact-kind-control"
-                      aria-label={ui.topicKindAria}
-                    >
+                <div className="section-title">
+                  <span className="section-title-label">
+                    <ChevronDown aria-hidden="true" size={13} />
+                    {ui.topicsSection}
+                    <small>{themeTopics.length}</small>
+                  </span>
+                  <button
+                    type="button"
+                    className="mini-icon-button"
+                    onClick={() =>
+                      setCreatePanel(createPanel === "topic" ? null : "topic")
+                    }
+                    aria-label={ui.addTopic}
+                  >
+                    <Plus aria-hidden="true" size={15} />
+                  </button>
+                </div>
+                <div className="topic-list">
+                  {themeTopics.map((topic) => {
+                    const count = store.versions.filter(
+                      (version) => version.topicId === topic.id,
+                    ).length;
+                    const isRenaming =
+                      renameTarget?.kind === "topic" &&
+                      renameTarget.id === topic.id;
+                    const TopicIcon =
+                      getTopicKind(topic) === "image" ? FileImage : FileText;
+                    return (
+                      <TreeRow
+                        key={topic.id}
+                        kind="topic"
+                        active={topic.id === selectedTopicId}
+                        count={count}
+                        deleteLabel={ui.deleteTopicAria(topic.title)}
+                        icon={<TopicIcon aria-hidden="true" size={15} />}
+                        name={topic.title}
+                        renaming={isRenaming}
+                        renameValue={renameTarget?.value}
+                        onClick={() => {
+                          setSelectedTopicId(topic.id);
+                          setCreatePanel(null);
+                        }}
+                        onDelete={() => handleTopicDelete(topic)}
+                        onDoubleClick={() =>
+                          startRename({
+                            kind: "topic",
+                            id: topic.id,
+                            value: topic.title,
+                          })
+                        }
+                        onRenameCancel={cancelRename}
+                        onRenameChange={updateRenameValue}
+                        onRenameCommit={() => void commitRename()}
+                      />
+                    );
+                  })}
+                </div>
+                {createPanel === "topic" ? (
+                  <form
+                    className="create-form create-panel"
+                    onSubmit={handleTopicCreate}
+                  >
+                    <div className="create-panel-header">
+                      <span>{ui.newTopic}</span>
                       <button
                         type="button"
-                        className={`segment-button ${newTopicKind === "text" ? "active" : ""}`}
-                        onClick={() => {
-                          setNewTopicKind("text");
-                          setNewTopicModelIds(defaultModelIdsByKind.text);
-                        }}
+                        className="mini-icon-button"
+                        onClick={() => setCreatePanel(null)}
+                        aria-label={ui.close}
                       >
-                        <FileText aria-hidden="true" size={15} />
-                        {ui.text}
-                      </button>
-                      <button
-                        type="button"
-                        className={`segment-button ${newTopicKind === "image" ? "active" : ""}`}
-                        onClick={() => {
-                          setNewTopicKind("image");
-                          setNewTopicModelIds(defaultModelIdsByKind.image);
-                        }}
-                      >
-                        <ImageIcon aria-hidden="true" size={15} />
-                        {ui.image}
+                        <X aria-hidden="true" size={14} />
                       </button>
                     </div>
-                  </div>
-                  <TagPopoverSelect
-                    addLabel={ui.addModel}
-                    emptyLabel={ui.noModelOptions}
-                    label={ui.model}
-                    options={getModelOptions(newTopicKind, customModels).map((option) => ({
-                      description: ui.modelRole(option.role),
-                      displayLabel: getModelDisplayName(option.id),
-                      group: option.provider,
-                      id: option.id,
-                      label: option.label,
-                    }))}
-                    placeholder={ui.modelPickerPlaceholder}
-                    removeLabel={ui.removeModelAria}
-                    value={newTopicModelIds}
-                    onChange={(value) => setNewTopicModelIds(value as TopicModelId[])}
-                  />
-                  <label className="create-field">
-                    <span>{ui.name}</span>
-                    <input
-                      value={newTopicTitle}
-                      onChange={(event) => setNewTopicTitle(event.target.value)}
-                      placeholder={ui.topicNamePlaceholder}
+                    <div className="create-field">
+                      <span>{ui.result}</span>
+                      <div
+                        className="result-type-control compact-kind-control"
+                        aria-label={ui.topicKindAria}
+                      >
+                        <button
+                          type="button"
+                          className={`segment-button ${newTopicKind === "text" ? "active" : ""}`}
+                          onClick={() => {
+                            setNewTopicKind("text");
+                            setNewTopicModelIds(defaultModelIdsByKind.text);
+                          }}
+                        >
+                          <FileText aria-hidden="true" size={15} />
+                          {ui.text}
+                        </button>
+                        <button
+                          type="button"
+                          className={`segment-button ${newTopicKind === "image" ? "active" : ""}`}
+                          onClick={() => {
+                            setNewTopicKind("image");
+                            setNewTopicModelIds(defaultModelIdsByKind.image);
+                          }}
+                        >
+                          <ImageIcon aria-hidden="true" size={15} />
+                          {ui.image}
+                        </button>
+                      </div>
+                    </div>
+                    <TagPopoverSelect
+                      addLabel={ui.addModel}
+                      emptyLabel={ui.noModelOptions}
+                      label={ui.model}
+                      options={getModelOptions(newTopicKind, customModels).map(
+                        (option) => ({
+                          description: [option.provider, option.memo]
+                            .filter(Boolean)
+                            .join(" · "),
+                          displayLabel: getModelDisplayName(option.id),
+                          group: ui.modelUse(option.kind),
+                          id: option.selectionId,
+                          label: option.label,
+                        }),
+                      )}
+                      placeholder={ui.modelPickerPlaceholder}
+                      removeLabel={ui.removeModelAria}
+                      value={newTopicModelIds}
+                      onChange={(value) =>
+                        setNewTopicModelIds(value as TopicModelId[])
+                      }
                     />
-                  </label>
-                  <label className="create-field">
-                    <span>{ui.memo}</span>
-                    <textarea
-                      value={newTopicBrief}
-                      onChange={(event) => setNewTopicBrief(event.target.value)}
-                      placeholder={ui.topicMemoPlaceholder}
-                      rows={3}
-                    />
-                  </label>
-                  <div className="create-actions">
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      onClick={() => setCreatePanel(null)}
-                    >
-                      {ui.cancel}
-                    </button>
-                    <button type="submit" className="primary-small-button">
-                      {ui.add}
-                    </button>
-                  </div>
-                </form>
-              ) : null}
+                    <label className="create-field">
+                      <span>{ui.name}</span>
+                      <input
+                        value={newTopicTitle}
+                        onChange={(event) =>
+                          setNewTopicTitle(event.target.value)
+                        }
+                        placeholder={ui.topicNamePlaceholder}
+                      />
+                    </label>
+                    <label className="create-field">
+                      <span>{ui.memo}</span>
+                      <textarea
+                        value={newTopicBrief}
+                        onChange={(event) =>
+                          setNewTopicBrief(event.target.value)
+                        }
+                        placeholder={ui.topicMemoPlaceholder}
+                        rows={3}
+                      />
+                    </label>
+                    <div className="create-actions">
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={() => setCreatePanel(null)}
+                      >
+                        {ui.cancel}
+                      </button>
+                      <button type="submit" className="primary-small-button">
+                        {ui.add}
+                      </button>
+                    </div>
+                  </form>
+                ) : null}
               </section>
             ) : null}
           </div>
@@ -2347,7 +2680,9 @@ export function App() {
                   }}
                   onImagePaste={handleImagePaste}
                   onImageUpload={handleImageUpload}
-                  onModelChange={(value) => void updateSelectedTopicModels(value)}
+                  onModelChange={(value) =>
+                    void updateSelectedTopicModels(value)
+                  }
                   onPasteTargetActiveChange={setPasteTargetActive}
                   onRemoveDraftImage={(imageId) =>
                     setDraftImages((current) =>

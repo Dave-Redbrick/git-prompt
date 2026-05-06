@@ -14,6 +14,7 @@ import {
   formatSignedNumber,
   formatCurrency,
   formatSignedCurrency,
+  getInputRateParts,
   getModelDisplayName,
   type VersionCostMetrics,
 } from "../lib/costEstimator";
@@ -63,6 +64,10 @@ const renderCostFormula = (
 ) => {
   const parts = metrics.modelCostItems.map<ReactNode>((item) => {
     const cost = formatCurrency(item.costUsd, locale, usdKrwRate);
+    const inputRate = item.type === "input" ? getInputRateParts(item) : null;
+    const inputRatePrice = inputRate
+      ? formatCurrency(inputRate.inputPriceUsd, locale, usdKrwRate)
+      : formatCurrency(0, locale, usdKrwRate);
 
     return (
       <span className="cost-formula-item" key={`${item.modelId}-${item.type}-${item.role}`}>
@@ -70,7 +75,12 @@ const renderCostFormula = (
         <span>
           {item.type === "image"
             ? ui.modelImageCostText((item.imageCount ?? 0).toLocaleString(), cost)
-            : ui.modelInputCostText((item.tokenCount ?? 0).toLocaleString(), cost)}
+            : ui.modelInputCostText(
+                (item.tokenCount ?? 0).toLocaleString(),
+                inputRatePrice,
+                (inputRate?.inputTokenUnitInTenThousands ?? 100).toLocaleString(),
+                cost,
+              )}
         </span>
       </span>
     );

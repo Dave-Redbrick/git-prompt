@@ -1,20 +1,27 @@
 export type PromptVersionKind = "text" | "image";
 
+export type TopicModelKind = PromptVersionKind | "voice" | "video";
+
 export type TopicModelId = string;
 
 export type TopicModelRole =
   | "chat-input"
   | "embedding"
   | "prompt-refiner"
-  | "image-generation";
+  | "image-generation"
+  | "voice"
+  | "video";
 
 export type TopicModelConfig = {
   id: TopicModelId;
   provider: string;
-  kind: PromptVersionKind;
+  kind: TopicModelKind;
+  memo?: string;
+  overridesModelKey?: TopicModelId;
   role: TopicModelRole;
   pricingType: "input" | "image";
-  inputUsdPerMillion?: number;
+  inputPriceUsd?: number;
+  inputTokenUnitInTenThousands?: number;
   costPerImageUsd?: number;
 };
 
@@ -22,7 +29,8 @@ export type CostSnapshotModelItem = {
   costPerImageUsd?: number;
   costUsd: number;
   imageCount?: number;
-  inputUsdPerMillion?: number;
+  inputPriceUsd?: number;
+  inputTokenUnitInTenThousands?: number;
   modelId: TopicModelId;
   provider: string;
   role: TopicModelRole;

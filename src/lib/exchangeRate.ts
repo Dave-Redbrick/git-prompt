@@ -67,9 +67,6 @@ const writeUsdKrwExchangeRate = (exchangeRate: UsdKrwExchangeRate) => {
   }
 };
 
-const isFreshFetchedRateForToday = (exchangeRate: UsdKrwExchangeRate | null) =>
-  exchangeRate?.fetchedFor === getLocalDateKey() && !exchangeRate.fallback;
-
 type FrankfurterRateResponse =
   | { date?: string; rates?: { KRW?: number } }
   | Array<{ base?: string; date?: string; quote?: string; rate?: number }>;
@@ -116,10 +113,6 @@ export const useUsdKrwExchangeRate = (enabled: boolean) => {
     const fallbackExchangeRate = createFallbackExchangeRate();
 
     setExchangeRate(cachedExchangeRate ?? fallbackExchangeRate);
-
-    if (isFreshFetchedRateForToday(cachedExchangeRate)) {
-      return;
-    }
 
     const controller = new AbortController();
     let cancelled = false;
