@@ -71,8 +71,10 @@ export function HistoryGraph({
         </div>
       </div>
       <div className="git-graph" aria-label={ui.graph}>
-        {activeVersionId === "draft" && hasDraftChanges ? (
-          <article className="graph-row draft active">
+        {hasDraftChanges ? (
+          <article
+            className={`graph-row draft ${activeVersionId === "draft" ? "active" : ""}`}
+          >
             <div className="graph-rail">
               <span className="graph-node open" />
               <span className="graph-line" />
@@ -101,8 +103,7 @@ export function HistoryGraph({
           .reverse()
           .map((version, index, reversedVersions) => {
             const isActive = version.id === activeVersionId;
-            const isLatest =
-              index === 0 && !(activeVersionId === "draft" && hasDraftChanges);
+            const isLatest = index === 0 && !hasDraftChanges;
             const metrics = metricsByVersion[version.id];
             const isGoodResult = Boolean(version.isGoodResult);
 

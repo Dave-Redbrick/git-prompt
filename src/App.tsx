@@ -1207,6 +1207,7 @@ export function App() {
         draftResultText.trim() !== getVersionResultText(editingVersion)) ||
       !draftImagesMatchStoredImages(draftImages, editingVersionStoredImages)
     : false;
+  const hasDraftGraphChanges = !editingVersion && rawDraftChanges;
   const hasDraftChanges = !editingVersion && !isVersionView && rawDraftChanges;
   const hasDraftPromptInput =
     getCombinedPromptText({
@@ -2028,11 +2029,19 @@ export function App() {
       modelIds: selectedTopicModelIds,
       updatedAt: createdAt,
     };
-    const committedDraft = buildCurrentDraftState(createdAt);
+    const nextDraft: PromptDraft = {
+      topicId: selectedTopic.id,
+      kind: selectedTopicKind,
+      label: `v${topicVersions.length + 2}`,
+      body,
+      userPrompt,
+      resultTexts: [""],
+      notes: "",
+      images: [],
+      updatedAt: createdAt,
+    };
     await putItem("topics", nextTopic);
-    if (committedDraft) {
-      await putItem("drafts", committedDraft);
-    }
+    await putItem("drafts", nextDraft);
 
     setStore((current) => ({
       ...current,
@@ -2043,10 +2052,9 @@ export function App() {
         a.createdAt.localeCompare(b.createdAt),
       ),
       images: [...current.images, ...imagesToSave],
-      drafts: committedDraft
-        ? upsertDraft(current.drafts, committedDraft)
-        : current.drafts,
+      drafts: upsertDraft(current.drafts, nextDraft),
     }));
+    applyDraftState(nextDraft);
     setActiveVersionId(versionId);
     setCompareDirection("previous");
     setBaseResultDiffIndex(0);
@@ -2409,7 +2417,7 @@ export function App() {
       <HistoryGraph
         activeVersionId={activeVersionId}
         draftNotes={draftNotes}
-        hasDraftChanges={hasDraftChanges}
+        hasDraftChanges={hasDraftGraphChanges}
         selectedTopic={selectedTopic ?? null}
         topicVersions={topicVersions}
         locale={locale}
