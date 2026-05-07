@@ -360,25 +360,14 @@ const formatTinyDecimal = (value: number) => {
   return value.toFixed(8);
 };
 
-const formatKrwAmount = (value: number) => {
-  if (value === 0) {
-    return "0";
-  }
+const formatKrwAmount = (value: number) =>
+  value.toLocaleString("ko-KR", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 
-  if (value >= 1) {
-    return Math.round(value).toLocaleString("ko-KR");
-  }
-
-  if (value >= 0.01) {
-    return value.toFixed(2);
-  }
-
-  if (value >= 0.0001) {
-    return value.toFixed(4);
-  }
-
-  return value.toFixed(6);
-};
+const formatKrwAxisAmount = (value: number) =>
+  Math.round(value).toLocaleString("ko-KR");
 
 export const formatUsd = (value: number) => {
   if (value === 0) {
@@ -404,6 +393,24 @@ export const formatCurrency = (
   }
 
   return formatUsd(valueUsd);
+};
+
+export const formatCurrencyAxis = (
+  valueUsd: number,
+  locale: CostCurrencyLocale,
+  usdKrwRate?: number | null,
+) => {
+  if (
+    locale === "ko" &&
+    typeof usdKrwRate === "number" &&
+    Number.isFinite(usdKrwRate)
+  ) {
+    const valueKrw = valueUsd * usdKrwRate;
+
+    return `${valueKrw < 0 ? "-" : ""}₩${formatKrwAxisAmount(Math.abs(valueKrw))}`;
+  }
+
+  return `${valueUsd < 0 ? "-" : ""}$${Math.round(Math.abs(valueUsd)).toLocaleString("en-US")}`;
 };
 
 export const formatSignedNumber = (value: number) =>

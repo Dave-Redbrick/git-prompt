@@ -11,6 +11,7 @@ import {
 } from "recharts";
 import type { Locale, UiMessages } from "../i18n";
 import {
+  formatCurrencyAxis,
   formatSignedNumber,
   formatCurrency,
   getInputRateParts,
@@ -196,6 +197,8 @@ export function CostTrendPanel({
   const usdKrwRate = exchangeRate?.rate ?? null;
   const formatCost = (valueUsd: number) =>
     formatCurrency(valueUsd, locale, usdKrwRate);
+  const formatAxisCost = (valueUsd: number) =>
+    formatCurrencyAxis(valueUsd, locale, usdKrwRate);
   const trendRows = topicVersions
     .map((version) => ({ metrics: metricsByVersion[version.id], version }))
     .filter((row): row is { metrics: VersionCostMetrics; version: PromptVersion } =>
@@ -300,7 +303,7 @@ export function CostTrendPanel({
                       tickLine={false}
                       axisLine={false}
                       width={72}
-                      tickFormatter={(value) => formatCost(Number(value))}
+                      tickFormatter={(value) => formatAxisCost(Number(value))}
                     />
                     <Tooltip
                       formatter={(value, name) =>
