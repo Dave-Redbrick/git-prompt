@@ -365,6 +365,8 @@ export function WritePanel({
             onClick={() => imageUploadInputRef.current?.click()}
             onFocus={() => onPasteTargetActiveChange(true)}
             onBlur={() => onPasteTargetActiveChange(false)}
+            onMouseEnter={() => onPasteTargetActiveChange(true)}
+            onMouseLeave={() => onPasteTargetActiveChange(false)}
             onPaste={
               isFullyReadOnly || selectedTopicKind !== "image"
                 ? undefined

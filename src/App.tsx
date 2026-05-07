@@ -2,6 +2,7 @@ import {
   ChangeEvent,
   ClipboardEvent as ReactClipboardEvent,
   FormEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -1877,32 +1878,80 @@ export function App() {
     event.target.value = "";
   };
 
+  const pasteClipboardImages = useCallback(
+    async (
+      clipboardData: DataTransfer | null,
+      preventDefault: () => void,
+    ) => {
+      if (!selectedTopicId || editorTopicKind !== "image") {
+        return;
+      }
+
+      const files = clipboardData
+        ? getCurrentClipboardImageFiles(clipboardData)
+        : [];
+      if (files.length === 0) {
+        setToast({
+          id: Date.now(),
+          message: ui.noClipboardImage,
+          variant: "error",
+        });
+        return;
+      }
+
+      preventDefault();
+      const pastedAt = new Date();
+      const timeLabel = `${pastedAt.getHours()}${pastedAt.getMinutes()}${pastedAt.getSeconds()}`;
+      const images = await Promise.all(
+        files.map((file, index) =>
+          fileToDraftImage(file, `clipboard-${timeLabel}-${index + 1}.png`),
+        ),
+      );
+
+      setDraftImages((current) => [...current, ...images]);
+      setActiveVersionId(editingVersionId ?? "draft");
+      setToast({ id: Date.now(), message: ui.imagesPasted, variant: "success" });
+    },
+    [
+      editingVersionId,
+      editorTopicKind,
+      selectedTopicId,
+      ui.imagesPasted,
+      ui.noClipboardImage,
+    ],
+  );
+
   const handleImagePaste = async (
     event: ReactClipboardEvent<HTMLButtonElement>,
   ) => {
-    if (!selectedTopicId || editorTopicKind !== "image") {
-      return;
-    }
-
-    const files = getCurrentClipboardImageFiles(event.clipboardData);
-    if (files.length === 0) {
-      showToast(ui.noClipboardImage, "error");
-      return;
-    }
-
-    event.preventDefault();
-    const pastedAt = new Date();
-    const timeLabel = `${pastedAt.getHours()}${pastedAt.getMinutes()}${pastedAt.getSeconds()}`;
-    const images = await Promise.all(
-      files.map((file, index) =>
-        fileToDraftImage(file, `clipboard-${timeLabel}-${index + 1}.png`),
-      ),
-    );
-
-    setDraftImages((current) => [...current, ...images]);
-    markEditorChanged();
-    showToast(ui.imagesPasted);
+    await pasteClipboardImages(event.clipboardData, () => event.preventDefault());
   };
+
+  useEffect(() => {
+    if (
+      !pasteTargetActive ||
+      mainView !== "write" ||
+      isVersionView ||
+      editorTopicKind !== "image"
+    ) {
+      return;
+    }
+
+    const handleDocumentPaste = (event: ClipboardEvent) => {
+      void pasteClipboardImages(event.clipboardData, () => event.preventDefault());
+    };
+
+    document.addEventListener("paste", handleDocumentPaste);
+    return () => {
+      document.removeEventListener("paste", handleDocumentPaste);
+    };
+  }, [
+    editorTopicKind,
+    isVersionView,
+    mainView,
+    pasteClipboardImages,
+    pasteTargetActive,
+  ]);
 
   const deleteDraftImage = async (imageId: string) => {
     const image = draftImages.find((item) => item.id === imageId);
