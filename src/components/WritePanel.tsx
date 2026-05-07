@@ -1,4 +1,12 @@
-import { ImagePlus, TextSelect, Trash2, Undo2 } from "lucide-react";
+import {
+  ImagePlus,
+  Mic,
+  Plus,
+  TextSelect,
+  Trash2,
+  Undo2,
+  Video,
+} from "lucide-react";
 import { useRef } from "react";
 import type {
   ChangeEvent,
@@ -6,6 +14,8 @@ import type {
 } from "react";
 import type { UiMessages } from "../i18n";
 import type { DraftImage, PromptVersionKind, TopicModelId } from "../types";
+import { pauseOtherAudioInGroup } from "../lib/audioPlayback";
+import { getResultMediaKind } from "../lib/promptVersions";
 import { TagPopoverSelect, type TagPopoverOption } from "./TagPopoverSelect";
 
 type WritePanelProps = {
@@ -13,55 +23,97 @@ type WritePanelProps = {
   draftImages: DraftImage[];
   draftLabel: string;
   draftNotes: string;
-  draftResultText: string;
+  draftResultTexts: string[];
+  draftUserPrompt: string;
+  audioGroupId: string;
   isVersionEdit?: boolean;
   isVersionView?: boolean;
   modelOptions: TagPopoverOption[];
   pasteTargetActive: boolean;
   previousBody: string;
-  previousResultText: string;
+  previousUserPrompt: string;
   selectedModelIds: TopicModelId[];
   selectedTopicKind: PromptVersionKind;
   ui: UiMessages;
   onDraftBodyChange: (value: string) => void;
   onDraftLabelChange: (value: string) => void;
   onDraftNotesChange: (value: string) => void;
-  onDraftResultTextChange: (value: string) => void;
+  onAddDraftResultText: () => void;
+  onDraftResultTextChange: (index: number, value: string) => void;
+  onDraftUserPromptChange: (value: string) => void;
   onImagePaste: (event: ReactClipboardEvent<HTMLButtonElement>) => void;
   onImageUpload: (event: ChangeEvent<HTMLInputElement>) => void;
   onModelChange: (value: string[]) => void;
   onPasteTargetActiveChange: (active: boolean) => void;
   onRemoveDraftImage: (imageId: string) => void;
+  onRemoveDraftResultText: (index: number) => void;
+  onResetDraftResultTexts: () => void;
 };
+
+function ResultMediaPreview({
+  audioGroupId,
+  media,
+}: {
+  audioGroupId: string;
+  media: DraftImage;
+}) {
+  const mediaKind = getResultMediaKind(media);
+
+  if (mediaKind === "video") {
+    return <video src={media.dataUrl} controls preload="metadata" />;
+  }
+
+  if (mediaKind === "audio") {
+    return (
+      <div className="media-audio-preview">
+        <audio
+          src={media.dataUrl}
+          controls
+          data-audio-group={audioGroupId}
+          onPlay={(event) => pauseOtherAudioInGroup(event.currentTarget)}
+        />
+      </div>
+    );
+  }
+
+  return <img src={media.dataUrl} alt={media.name} />;
+}
 
 export function WritePanel({
   draftBody,
   draftImages,
   draftLabel,
   draftNotes,
-  draftResultText,
+  draftResultTexts,
+  draftUserPrompt,
+  audioGroupId,
   isVersionEdit = false,
   isVersionView = false,
   modelOptions,
   pasteTargetActive,
   previousBody,
-  previousResultText,
+  previousUserPrompt,
   selectedModelIds,
   selectedTopicKind,
   ui,
   onDraftBodyChange,
   onDraftLabelChange,
   onDraftNotesChange,
+  onAddDraftResultText,
   onDraftResultTextChange,
+  onDraftUserPromptChange,
   onImagePaste,
   onImageUpload,
   onModelChange,
   onPasteTargetActiveChange,
   onRemoveDraftImage,
+  onRemoveDraftResultText,
+  onResetDraftResultTexts,
 }: WritePanelProps) {
   const imageUploadInputRef = useRef<HTMLInputElement>(null);
   const promptTextareaRef = useRef<HTMLTextAreaElement>(null);
-  const resultTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const resultTextareaRefs = useRef<Array<HTMLTextAreaElement | null>>([]);
+  const userPromptTextareaRef = useRef<HTMLTextAreaElement>(null);
   const isPromptLocked = isVersionEdit || isVersionView;
   const isFullyReadOnly = isVersionView;
   const panelTitle = isVersionEdit
@@ -74,6 +126,28 @@ export function WritePanel({
     textarea?.focus();
     textarea?.select();
   };
+  const resultTextCharCount = draftResultTexts.reduce(
+    (total, text) => total + text.length,
+    0,
+  );
+  const editableResultTexts =
+    draftResultTexts.length > 0 ? draftResultTexts : [""];
+  const fileResultAccept =
+    selectedTopicKind === "image"
+      ? "image/*"
+      : selectedTopicKind === "audio"
+        ? ".mp3,.wav,.m4a,.aac,.flac,.ogg,.oga,.opus,.aif,.aiff,audio/mpeg,audio/wav,audio/x-wav,audio/aac,audio/flac,audio/ogg,audio/opus"
+        : ".mp4,.mov,.webm,.mkv,.m4v,video/*";
+  const fileUploadHint =
+    selectedTopicKind === "image"
+      ? ui.pasteImageHint
+      : ui.chooseResultFileHint;
+  const ResultFileIcon =
+    selectedTopicKind === "audio"
+      ? Mic
+      : selectedTopicKind === "video"
+        ? Video
+        : ImagePlus;
 
   return (
     <section className="panel editor-panel">
@@ -81,9 +155,9 @@ export function WritePanel({
         <h3>{panelTitle}</h3>
         <span>
           {ui.promptChars(
-            draftBody.length.toLocaleString(),
+            (draftBody.length + draftUserPrompt.length).toLocaleString(),
             selectedTopicKind === "text"
-              ? draftResultText.length.toLocaleString()
+              ? resultTextCharCount.toLocaleString()
               : undefined,
           )}
         </span>
@@ -112,7 +186,7 @@ export function WritePanel({
       </label>
       <div className={`editor-field ${isPromptLocked ? "locked" : ""}`}>
         <div className="field-title-row">
-          <span>{ui.prompt}</span>
+          <span>{ui.systemPrompt}</span>
           <div className="field-actions">
             <button
               type="button"
@@ -143,47 +217,45 @@ export function WritePanel({
           readOnly={isPromptLocked}
           onChange={(event) => onDraftBodyChange(event.target.value)}
           placeholder={ui.promptPlaceholder}
-          aria-label={ui.prompt}
+          aria-label={ui.systemPrompt}
         />
       </div>
-      {selectedTopicKind === "text" ? (
-        <div className={`editor-field result-text-field ${isFullyReadOnly ? "locked" : ""}`}>
-          <div className="field-title-row">
-            <span>{ui.resultText}</span>
-            <div className="field-actions">
-              <button
-                type="button"
-                className="field-action-button"
-                onClick={() => selectTextarea(resultTextareaRef.current)}
-                aria-label={ui.selectResultTextAria}
-                title={ui.selectResultTextAria}
-              >
-                <TextSelect aria-hidden="true" size={14} />
-                <span>{ui.selectAll}</span>
-              </button>
-              <button
-                type="button"
-                className="field-action-button"
-                disabled={isFullyReadOnly}
-                onClick={() => onDraftResultTextChange(previousResultText)}
-                aria-label={ui.resetResultTextAria}
-                title={ui.resetResultTextAria}
-              >
-                <Undo2 aria-hidden="true" size={14} />
-                <span>{ui.reset}</span>
-              </button>
-            </div>
+      <div className={`editor-field user-prompt-field ${isPromptLocked ? "locked" : ""}`}>
+        <div className="field-title-row">
+          <span>{ui.userPrompt}</span>
+          <div className="field-actions">
+            <button
+              type="button"
+              className="field-action-button"
+              onClick={() => selectTextarea(userPromptTextareaRef.current)}
+              aria-label={ui.selectUserPromptAria}
+              title={ui.selectUserPromptAria}
+            >
+              <TextSelect aria-hidden="true" size={14} />
+              <span>{ui.selectAll}</span>
+            </button>
+            <button
+              type="button"
+              className="field-action-button"
+              disabled={isPromptLocked}
+              onClick={() => onDraftUserPromptChange(previousUserPrompt)}
+              aria-label={ui.resetUserPromptAria}
+              title={ui.resetUserPromptAria}
+            >
+              <Undo2 aria-hidden="true" size={14} />
+              <span>{ui.reset}</span>
+            </button>
           </div>
-          <textarea
-            ref={resultTextareaRef}
-            value={draftResultText}
-            readOnly={isFullyReadOnly}
-            onChange={(event) => onDraftResultTextChange(event.target.value)}
-            placeholder={ui.resultTextPlaceholder}
-            aria-label={ui.resultText}
-          />
         </div>
-      ) : null}
+        <textarea
+          ref={userPromptTextareaRef}
+          value={draftUserPrompt}
+          readOnly={isPromptLocked}
+          onChange={(event) => onDraftUserPromptChange(event.target.value)}
+          placeholder={ui.userPromptPlaceholder}
+          aria-label={ui.userPrompt}
+        />
+      </div>
       <label>
         {ui.notes}
         <textarea
@@ -194,63 +266,145 @@ export function WritePanel({
           rows={3}
         />
       </label>
-
-      {selectedTopicKind === "image" ? (
-        <div className="image-result-section">
-          <div className="image-input-panel">
-            <div className="upload-row">
-              <span>{ui.resultImageCount(draftImages.length)}</span>
+      {selectedTopicKind === "text" ? (
+        <div className={`editor-field result-text-field ${isFullyReadOnly ? "locked" : ""}`}>
+          <div className="field-title-row">
+            <span>{ui.resultText}</span>
+            <div className="field-actions">
+              <button
+                type="button"
+                className="field-action-button"
+                disabled={isFullyReadOnly}
+                onClick={onAddDraftResultText}
+                aria-label={ui.addResultText}
+                title={ui.addResultText}
+              >
+                <Plus aria-hidden="true" size={14} />
+                <span>{ui.add}</span>
+              </button>
+              <button
+                type="button"
+                className="field-action-button"
+                disabled={isFullyReadOnly}
+                onClick={onResetDraftResultTexts}
+                aria-label={ui.resetResultTextAria}
+                title={ui.resetResultTextAria}
+              >
+                <Undo2 aria-hidden="true" size={14} />
+                <span>{ui.reset}</span>
+              </button>
             </div>
-            <input
-              ref={imageUploadInputRef}
-              className="image-add-input"
-              type="file"
-              accept="image/*"
-              multiple
-              disabled={isFullyReadOnly}
-              onChange={onImageUpload}
-              tabIndex={-1}
-            />
-            <button
-              type="button"
-              className={`image-add-target ${pasteTargetActive ? "active" : ""}`}
-              disabled={isFullyReadOnly}
-              onClick={() => imageUploadInputRef.current?.click()}
-              onFocus={() => onPasteTargetActiveChange(true)}
-              onBlur={() => onPasteTargetActiveChange(false)}
-              onPaste={isFullyReadOnly ? undefined : onImagePaste}
-            >
-              <ImagePlus aria-hidden="true" size={18} />
-              <span>
-                <strong>{ui.resultImageUpload}</strong>
-                <small>{ui.pasteImageHint}</small>
-              </span>
-            </button>
           </div>
-
-          {draftImages.length > 0 ? (
-            <div className="image-grid compact">
-              {draftImages.map((image) => (
-                <figure key={image.id} className="image-tile">
-                  <img src={image.dataUrl} alt={image.name} />
-                  <figcaption>
-                    <span>{image.name}</span>
+          <div className="result-text-list">
+            {editableResultTexts.map((resultText, index) => (
+              <div className="result-text-item" key={index}>
+                <div className="field-title-row result-text-item-title">
+                  <span>{ui.resultTextIndex(index + 1)}</span>
+                  <div className="field-actions">
+                    <button
+                      type="button"
+                      className="field-action-button"
+                      onClick={() => selectTextarea(resultTextareaRefs.current[index] ?? null)}
+                      aria-label={ui.selectResultTextItemAria(index + 1)}
+                      title={ui.selectResultTextItemAria(index + 1)}
+                    >
+                      <TextSelect aria-hidden="true" size={14} />
+                      <span>{ui.selectAll}</span>
+                    </button>
                     {isFullyReadOnly ? null : (
                       <button
                         type="button"
-                        className="image-delete-button"
-                        onClick={() => onRemoveDraftImage(image.id)}
-                        aria-label={ui.deleteImageAria(image.name)}
+                        className="field-action-button danger"
+                        onClick={() => onRemoveDraftResultText(index)}
+                        aria-label={ui.deleteResultTextAria(index + 1)}
+                        title={ui.deleteResultTextAria(index + 1)}
                       >
                         <Trash2 aria-hidden="true" size={14} />
                       </button>
                     )}
-                  </figcaption>
-                </figure>
-              ))}
-            </div>
-          ) : null}
+                  </div>
+                </div>
+                <textarea
+                  ref={(element) => {
+                    resultTextareaRefs.current[index] = element;
+                  }}
+                  value={resultText}
+                  readOnly={isFullyReadOnly}
+                  onChange={(event) =>
+                    onDraftResultTextChange(index, event.target.value)
+                  }
+                  placeholder={ui.resultTextPlaceholder}
+                  aria-label={ui.resultTextIndex(index + 1)}
+                />
+              </div>
+            ))}
+          </div>
         </div>
+      ) : null}
+
+      {selectedTopicKind !== "text" ? (
+      <div className="image-result-section">
+        <div className="image-input-panel">
+          <div className="upload-row">
+            <span>{ui.resultFileCount(selectedTopicKind, draftImages.length)}</span>
+          </div>
+          <input
+            ref={imageUploadInputRef}
+            className="image-add-input"
+            type="file"
+            accept={fileResultAccept}
+            multiple
+            disabled={isFullyReadOnly}
+            onChange={onImageUpload}
+            tabIndex={-1}
+          />
+          <button
+            type="button"
+            className={`image-add-target ${pasteTargetActive ? "active" : ""}`}
+            disabled={isFullyReadOnly}
+            onClick={() => imageUploadInputRef.current?.click()}
+            onFocus={() => onPasteTargetActiveChange(true)}
+            onBlur={() => onPasteTargetActiveChange(false)}
+            onPaste={
+              isFullyReadOnly || selectedTopicKind !== "image"
+                ? undefined
+                : onImagePaste
+            }
+          >
+            <ResultFileIcon aria-hidden="true" size={18} />
+            <span>
+              <strong>{ui.resultFileUpload(selectedTopicKind)}</strong>
+              <small>{fileUploadHint}</small>
+            </span>
+          </button>
+        </div>
+
+        {draftImages.length > 0 ? (
+          <div className="image-grid compact">
+            {draftImages.map((image) => (
+              <figure
+                key={image.id}
+                className={`image-tile ${getResultMediaKind(image)}-tile`}
+              >
+                <ResultMediaPreview audioGroupId={audioGroupId} media={image} />
+                <figcaption>
+                  <span>{image.name}</span>
+                  {isFullyReadOnly ? null : (
+                    <button
+                      type="button"
+                      className="image-delete-button"
+                      onClick={() => onRemoveDraftImage(image.id)}
+                      aria-label={ui.deleteImageAria(image.name)}
+                    >
+                      <Trash2 aria-hidden="true" size={14} />
+                    </button>
+                  )}
+                </figcaption>
+              </figure>
+            ))}
+          </div>
+        ) : null}
+      </div>
       ) : null}
     </section>
   );

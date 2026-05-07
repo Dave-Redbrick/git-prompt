@@ -2,11 +2,13 @@ import type {
   ImageAsset,
   Project,
   PromptVersion,
+  ResultMediaKind,
   Theme,
   Topic,
   TopicModelConfig,
 } from "../types";
 import { createId, nowIso, putItem } from "./db";
+import { getResultMediaKind, getVersionResultTexts, joinResultTexts } from "./promptVersions";
 
 export type ProjectArchiveStore = {
   projects: Project[];
@@ -17,20 +19,32 @@ export type ProjectArchiveStore = {
   customModels: TopicModelConfig[];
 };
 
-type ArchiveImage = Omit<ImageAsset, "dataUrl"> & {
+type ArchivePromptVersion = Omit<PromptVersion, "resultText" | "resultTexts">;
+
+type ArchiveResultKind = "text" | ResultMediaKind;
+
+type ArchiveResultFile = {
+  id: string;
+  topicId: string;
+  versionId: string;
+  kind: ArchiveResultKind;
+  name: string;
+  type: string;
   path: string;
+  createdAt: string;
+  index?: number;
 };
 
 type ProjectArchiveManifest = {
   app: "Git Prompt";
   exportedAt: string;
   schema: "git-prompt.project-archive";
-  version: 1;
+  version: 2;
   project: Project;
   themes: Theme[];
   topics: Topic[];
-  versions: PromptVersion[];
-  images: ArchiveImage[];
+  versions: ArchivePromptVersion[];
+  resultFiles: ArchiveResultFile[];
   customModels: TopicModelConfig[];
 };
 
@@ -115,10 +129,16 @@ const sanitizePathPart = (value: string) =>
     .replace(/^-+|-+$/g, "")
     .slice(0, 80) || "project";
 
+const getFileExtension = (name: string) =>
+  name.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() ?? "";
+
+const getBaseName = (name: string) =>
+  name.replace(/\.[a-z0-9]+$/i, "") || name;
+
 const dataUrlToBytes = (dataUrl: string) => {
   const match = /^data:([^;,]+)?(?:;[^,]*)?;base64,(.*)$/i.exec(dataUrl);
   if (!match) {
-    throw new Error("Unsupported image data URL.");
+    throw new Error("Unsupported result file data URL.");
   }
 
   const binary = atob(match[2]);
@@ -141,13 +161,13 @@ const bytesToDataUrl = (bytes: Uint8Array, mimeType: string) => {
   return `data:${mimeType};base64,${btoa(binary)}`;
 };
 
-const fileExtensionForImage = (image: ImageAsset) => {
-  const fromName = image.name.match(/\.([a-z0-9]+)$/i)?.[1];
+const fileExtensionForResultFile = (file: Pick<ImageAsset, "name" | "type">) => {
+  const fromName = getFileExtension(file.name);
   if (fromName) {
-    return fromName.toLowerCase();
+    return fromName;
   }
 
-  const fromType = image.type.split("/")[1];
+  const fromType = file.type.split("/")[1];
   return fromType ? fromType.replace("jpeg", "jpg") : "bin";
 };
 
@@ -263,7 +283,8 @@ function assertArchiveManifest(
     !value ||
     typeof value !== "object" ||
     (value as ProjectArchiveManifest).schema !== "git-prompt.project-archive" ||
-    (value as ProjectArchiveManifest).version !== 1 ||
+    (value as ProjectArchiveManifest).version !== 2 ||
+    !Array.isArray((value as ProjectArchiveManifest).resultFiles) ||
     !Array.isArray((value as ProjectArchiveManifest).customModels)
   ) {
     throw new Error("Invalid Git Prompt project archive.");
@@ -290,29 +311,48 @@ const collectProjectArchive = (
     .filter((version) => topicIds.has(version.topicId))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const versionIds = new Set(versions.map((version) => version.id));
-  const images = store.images
+  const textResultFiles = versions.flatMap((version) =>
+    getVersionResultTexts(version).map<ArchiveResultFile>((_resultText, index) => ({
+      id: `${version.id}:text:${index + 1}`,
+      topicId: version.topicId,
+      versionId: version.id,
+      kind: "text",
+      name: `result-${index + 1}.txt`,
+      type: "text/plain;charset=utf-8",
+      path: `results/${version.id}/result-${index + 1}.txt`,
+      createdAt: version.createdAt,
+      index,
+    })),
+  );
+  const mediaResultFiles = store.images
     .filter(
       (image) => topicIds.has(image.topicId) || versionIds.has(image.versionId),
     )
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-    .map(({ dataUrl, ...image }) => {
-      const extension = fileExtensionForImage({ ...image, dataUrl });
+    .map<ArchiveResultFile>(({ dataUrl: _dataUrl, ...image }) => {
+      const extension = fileExtensionForResultFile(image);
+      const baseName = sanitizePathPart(getBaseName(image.name));
       return {
         ...image,
-        path: `images/${image.id}-${sanitizePathPart(image.name)}.${extension}`,
+        kind: image.kind ?? getResultMediaKind(image),
+        path: `results/${image.versionId}/${image.id}-${baseName}.${extension}`,
       };
     });
+  const archiveVersions = versions.map<ArchivePromptVersion>(
+    ({ resultText: _resultText, resultTexts: _resultTexts, ...version }) =>
+      version,
+  );
 
   return {
     app: "Git Prompt",
     exportedAt: nowIso(),
     schema: "git-prompt.project-archive",
-    version: 1,
+    version: 2,
     project,
     themes,
     topics,
-    versions,
-    images,
+    versions: archiveVersions,
+    resultFiles: [...textResultFiles, ...mediaResultFiles],
     customModels: store.customModels ?? [],
   };
 };
@@ -322,14 +362,30 @@ export const createProjectArchiveZip = async (
   store: ProjectArchiveStore,
 ) => {
   const manifest = collectProjectArchive(projectId, store);
-  const originalImages = new Map(store.images.map((image) => [image.id, image]));
-  const imageEntries = manifest.images.map((image) => {
-    const original = originalImages.get(image.id);
-    if (!original) {
-      throw new Error(`Missing image: ${image.id}`);
+  const originalMediaFiles = new Map(store.images.map((image) => [image.id, image]));
+  const originalVersions = new Map(
+    store.versions.map((version) => [version.id, version]),
+  );
+  const resultEntries = manifest.resultFiles.map((resultFile) => {
+    if (resultFile.kind === "text") {
+      const version = originalVersions.get(resultFile.versionId);
+      const resultText = version
+        ? (getVersionResultTexts(version)[resultFile.index ?? 0] ?? "")
+        : "";
+
+      return {
+        name: resultFile.path,
+        data: textEncoder.encode(resultText),
+      };
     }
+
+    const original = originalMediaFiles.get(resultFile.id);
+    if (!original) {
+      throw new Error(`Missing result file: ${resultFile.id}`);
+    }
+
     return {
-      name: image.path,
+      name: resultFile.path,
       data: dataUrlToBytes(original.dataUrl).bytes,
     };
   });
@@ -337,7 +393,7 @@ export const createProjectArchiveZip = async (
     name: "manifest.json",
     data: textEncoder.encode(JSON.stringify(manifest, null, 2)),
   };
-  const blob = createZipBlob([manifestEntry, ...imageEntries]);
+  const blob = createZipBlob([manifestEntry, ...resultEntries]);
   const fileName = `${sanitizePathPart(manifest.project.name)}-git-prompt.zip`;
 
   return { blob, fileName, manifest };
@@ -395,27 +451,60 @@ export const importProjectArchiveZip = async (
     projectId,
     themeId: topic.themeId ? themeIdMap.get(topic.themeId) : undefined,
   }));
-  const versions: PromptVersion[] = manifest.versions.map((version) => ({
-    ...version,
-    id: versionIdMap.get(version.id) ?? createId(),
-    topicId: topicIdMap.get(version.topicId) ?? version.topicId,
-  }));
-  const images: ImageAsset[] = manifest.images.map((image) => {
-    const imageData = entryMap.get(image.path);
-    if (!imageData) {
-      throw new Error(`Missing image file: ${image.path}`);
+  const textResultsByVersion = new Map<string, string[]>();
+  const textResultFiles = manifest.resultFiles
+    .filter((resultFile) => resultFile.kind === "text")
+    .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+
+  for (const resultFile of textResultFiles) {
+    const textData = entryMap.get(resultFile.path);
+    if (!textData) {
+      throw new Error(`Missing result file: ${resultFile.path}`);
     }
 
+    const results = textResultsByVersion.get(resultFile.versionId) ?? [];
+    results[resultFile.index ?? results.length] = textDecoder.decode(textData);
+    textResultsByVersion.set(resultFile.versionId, results);
+  }
+
+  const versions: PromptVersion[] = manifest.versions.map((version) => {
+    const resultTexts = (textResultsByVersion.get(version.id) ?? []).filter(
+      (resultText) => resultText.trim().length > 0,
+    );
+    const resultText = joinResultTexts(resultTexts);
+
+    const versionKind = version.kind ?? "text";
+
     return {
-      id: createId(),
-      topicId: topicIdMap.get(image.topicId) ?? image.topicId,
-      versionId: versionIdMap.get(image.versionId) ?? image.versionId,
-      name: image.name,
-      type: image.type,
-      dataUrl: bytesToDataUrl(imageData, image.type),
-      createdAt: image.createdAt,
+      ...version,
+      id: versionIdMap.get(version.id) ?? createId(),
+      topicId: topicIdMap.get(version.topicId) ?? version.topicId,
+      resultText: versionKind === "text" ? resultText : "",
+      resultTexts: versionKind === "text" ? resultTexts : [],
     };
   });
+  const images: ImageAsset[] = manifest.resultFiles
+    .filter(
+      (resultFile): resultFile is ArchiveResultFile & { kind: ResultMediaKind } =>
+        resultFile.kind !== "text",
+    )
+    .map((resultFile) => {
+      const resultData = entryMap.get(resultFile.path);
+      if (!resultData) {
+        throw new Error(`Missing result file: ${resultFile.path}`);
+      }
+
+      return {
+        id: createId(),
+        topicId: topicIdMap.get(resultFile.topicId) ?? resultFile.topicId,
+        versionId: versionIdMap.get(resultFile.versionId) ?? resultFile.versionId,
+        kind: resultFile.kind,
+        name: resultFile.name,
+        type: resultFile.type,
+        dataUrl: bytesToDataUrl(resultData, resultFile.type),
+        createdAt: resultFile.createdAt,
+      };
+    });
   const customModels = manifest.customModels;
 
   await putItem("projects", project);

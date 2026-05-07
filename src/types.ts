@@ -1,6 +1,8 @@
-export type PromptVersionKind = "text" | "image";
+export type PromptVersionKind = "text" | "image" | "audio" | "video";
 
-export type TopicModelKind = PromptVersionKind | "voice" | "video";
+export type TopicModelKind = "text" | "image" | "voice" | "video";
+
+export type ResultMediaKind = "image" | "audio" | "video";
 
 export type TopicModelId = string;
 
@@ -46,6 +48,7 @@ export type VersionCostSnapshot = {
   modelCostItems: CostSnapshotModelItem[];
   promptChars: number;
   promptTokens: number;
+  resultCount?: number;
   resultChars: number;
   totalCostUsd: number;
 };
@@ -88,21 +91,39 @@ export type PromptVersion = {
   isGoodResult?: boolean;
   label: string;
   body: string;
+  userPrompt?: string;
   resultText?: string;
+  resultTexts?: string[];
   notes: string;
   createdAt: string;
+};
+
+export type PromptDraft = {
+  topicId: string;
+  kind?: PromptVersionKind;
+  label: string;
+  body: string;
+  userPrompt?: string;
+  resultTexts?: string[];
+  notes: string;
+  images: DraftImage[];
+  updatedAt: string;
 };
 
 export type ImageAsset = {
   id: string;
   topicId: string;
   versionId: string;
+  kind?: ResultMediaKind;
   name: string;
   type: string;
   dataUrl: string;
   createdAt: string;
 };
 
-export type DraftImage = Pick<ImageAsset, "id" | "name" | "type" | "dataUrl"> & {
+export type DraftImage = Pick<
+  ImageAsset,
+  "id" | "kind" | "name" | "type" | "dataUrl"
+> & {
   sourceId?: string;
 };

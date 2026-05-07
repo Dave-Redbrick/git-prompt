@@ -1,4 +1,5 @@
-import { Diff } from "lucide-react";
+import { useRef } from "react";
+import { ChevronLeft, ChevronRight, Diff } from "lucide-react";
 import type { UiMessages } from "../i18n";
 import type { LineDiffRow } from "../lib/diff";
 import type {
@@ -14,6 +15,8 @@ type DiffPanelProps = {
   addedCount: number;
   canCompareNext: boolean;
   canComparePrevious: boolean;
+  baseResultDiffCount: number;
+  baseResultDiffIndex: number;
   compareBase: PromptVersion | null;
   compareBaseImages: Array<ImageAsset | DraftImage>;
   compareDirection: "previous" | "next";
@@ -21,16 +24,24 @@ type DiffPanelProps = {
   compareTargetKind: PromptVersionKind;
   compareTargetLabel: string;
   compareTargetVersion: PromptVersion | null;
-  lineDiffRows: LineDiffRow[];
   removedCount: number;
+  resultTextDiffRows: LineDiffRow[];
   showCompareControls: boolean;
+  systemPromptDiffRows: LineDiffRow[];
+  targetResultDiffCount: number;
+  targetResultDiffIndex: number;
   ui: UiMessages;
+  userPromptDiffRows: LineDiffRow[];
+  onBaseResultDiffIndexChange: (index: number) => void;
   onCompareDirectionChange: (direction: "previous" | "next") => void;
+  onTargetResultDiffIndexChange: (index: number) => void;
   onToggleGoodResult: (version: PromptVersion) => void;
 };
 
 export function DiffPanel({
   addedCount,
+  baseResultDiffCount,
+  baseResultDiffIndex,
   canCompareNext,
   canComparePrevious,
   compareBase,
@@ -40,13 +51,21 @@ export function DiffPanel({
   compareTargetKind,
   compareTargetLabel,
   compareTargetVersion,
-  lineDiffRows,
   removedCount,
+  resultTextDiffRows,
   showCompareControls,
+  systemPromptDiffRows,
+  targetResultDiffCount,
+  targetResultDiffIndex,
   ui,
+  userPromptDiffRows,
+  onBaseResultDiffIndexChange,
   onCompareDirectionChange,
+  onTargetResultDiffIndexChange,
   onToggleGoodResult,
 }: DiffPanelProps) {
+  const baseResultSlideDirectionRef = useRef<"next" | "previous">("next");
+  const targetResultSlideDirectionRef = useRef<"next" | "previous">("next");
   const renderVersionTitle = (label: string, version: PromptVersion | null) => (
     <span className="diff-version-title">
       {version ? (
@@ -59,6 +78,136 @@ export function DiffPanel({
       ) : null}
       <span>{label}</span>
     </span>
+  );
+
+  const baseTitle = renderVersionTitle(
+    compareBase?.label ?? ui.noPreviousVersion,
+    compareBase,
+  );
+  const targetTitle = renderVersionTitle(compareTargetLabel, compareTargetVersion);
+  const baseAudioGroupId = `diff:base:${compareBase?.id ?? "empty"}`;
+  const targetAudioGroupId = `diff:target:${compareTargetVersion?.id ?? "draft"}`;
+  const showResultPreview =
+    compareTargetKind === "text" ||
+    compareBaseImages.length > 0 ||
+    compareTargetImages.length > 0 ||
+    baseResultDiffCount > 0 ||
+    targetResultDiffCount > 0;
+  const currentBaseResultIndex = Math.min(
+    baseResultDiffIndex,
+    Math.max(0, baseResultDiffCount - 1),
+  );
+  const currentTargetResultIndex = Math.min(
+    targetResultDiffIndex,
+    Math.max(0, targetResultDiffCount - 1),
+  );
+  const renderResultControls = (
+    count: number,
+    currentIndex: number,
+    onIndexChange: (index: number) => void,
+    onDirectionChange: (direction: "next" | "previous") => void,
+  ) => {
+    if (count <= 1) {
+      return null;
+    }
+
+    const goToPreviousResult = () => {
+      onDirectionChange("previous");
+      onIndexChange(currentIndex === 0 ? count - 1 : currentIndex - 1);
+    };
+    const goToNextResult = () => {
+      onDirectionChange("next");
+      onIndexChange((currentIndex + 1) % count);
+    };
+    const goToResult = (index: number) => {
+      if (index === currentIndex) {
+        return;
+      }
+
+      const direction =
+        currentIndex === count - 1 && index === 0
+          ? "next"
+          : currentIndex === 0 && index === count - 1
+            ? "previous"
+            : index > currentIndex
+              ? "next"
+              : "previous";
+
+      onDirectionChange(direction);
+      onIndexChange(index);
+    };
+
+    return (
+      <span className="result-gallery-controls">
+        <button
+          type="button"
+          className="result-gallery-arrow"
+          onClick={goToPreviousResult}
+          aria-label={ui.previousResultAria}
+        >
+          <ChevronLeft aria-hidden="true" size={14} />
+        </button>
+        <span className="result-gallery-dots" aria-label={ui.resultGalleryAria}>
+          {Array.from({ length: count }, (_item, index) => (
+            <button
+              type="button"
+              key={index}
+              className={index === currentIndex ? "active" : ""}
+              onClick={() => goToResult(index)}
+              aria-label={ui.resultDotAria(index + 1)}
+            />
+          ))}
+        </span>
+        <button
+          type="button"
+          className="result-gallery-arrow"
+          onClick={goToNextResult}
+          aria-label={ui.nextResultAria}
+        >
+          <ChevronRight aria-hidden="true" size={14} />
+        </button>
+      </span>
+    );
+  };
+  const baseResultControls = renderResultControls(
+    baseResultDiffCount,
+    currentBaseResultIndex,
+    onBaseResultDiffIndexChange,
+    (direction) => {
+      baseResultSlideDirectionRef.current = direction;
+    },
+  );
+  const targetResultControls = renderResultControls(
+    targetResultDiffCount,
+    currentTargetResultIndex,
+    onTargetResultDiffIndexChange,
+    (direction) => {
+      targetResultSlideDirectionRef.current = direction;
+    },
+  );
+  const showResultControlsHeader = Boolean(
+    baseResultControls || targetResultControls,
+  );
+  const resultLabel = (
+    <div className="result-diff-label">
+      <span>{ui.result}</span>
+    </div>
+  );
+  const renderPromptDiffBlock = (label: string, rows: LineDiffRow[]) => (
+    <div className="prompt-diff-block">
+      <div className="prompt-diff-label">
+        <span>{label}</span>
+      </div>
+      <SplitDiffFiles
+        ariaLabel={ui.promptDiffAria}
+        baseTitle={baseTitle}
+        className="prompt-diff-preview"
+        showHeaders={false}
+        targetTitle={targetTitle}
+        rows={rows}
+        emptyLabel={ui.emptyContent}
+      />
+    </div>
   );
 
   return (
@@ -95,30 +244,54 @@ export function DiffPanel({
           </div>
         </div>
       </div>
-      {compareTargetKind === "image" ? (
-        <ImageDiffPreview
-          ariaLabel={ui.imageDiffAria}
-          baseTitle={renderVersionTitle(
-            compareBase?.label ?? ui.noPreviousVersion,
-            compareBase,
-          )}
-          targetTitle={renderVersionTitle(compareTargetLabel, compareTargetVersion)}
-          baseImage={compareBaseImages[0]}
-          targetImage={compareTargetImages[0]}
-          emptyLabel={ui.emptyImage}
-        />
-      ) : (
-        <SplitDiffFiles
-          ariaLabel={ui.promptDiffAria}
-          baseTitle={renderVersionTitle(
-            compareBase?.label ?? ui.noPreviousVersion,
-            compareBase,
-          )}
-          targetTitle={renderVersionTitle(compareTargetLabel, compareTargetVersion)}
-          rows={lineDiffRows}
-          emptyLabel={ui.emptyContent}
-        />
-      )}
+      <div
+        className={`diff-panel-body ${
+          showResultPreview ? "with-result-preview" : ""
+        }`}
+      >
+        <div className="diff-version-header-row">
+          <div className="diff-version-header-cell">{baseTitle}</div>
+          <div className="diff-version-header-cell">{targetTitle}</div>
+        </div>
+        <div className="prompt-diff-section">
+          {renderPromptDiffBlock(ui.systemPrompt, systemPromptDiffRows)}
+          {renderPromptDiffBlock(ui.userPrompt, userPromptDiffRows)}
+        </div>
+        {compareTargetKind === "text" ? (
+          <div className="result-diff-section">
+            {resultLabel}
+            <SplitDiffFiles
+              ariaLabel={ui.resultTextDiffAria}
+              baseTitle={baseResultControls}
+              className="result-text-diff-preview"
+              showHeaders={showResultControlsHeader}
+              targetTitle={targetResultControls}
+              rows={resultTextDiffRows}
+              emptyLabel={ui.emptyContent}
+            />
+          </div>
+        ) : baseResultDiffCount > 0 || targetResultDiffCount > 0 ? (
+          <div className="result-diff-section">
+            {resultLabel}
+            <ImageDiffPreview
+              ariaLabel={ui.resultFileDiffAria}
+              baseActiveIndex={currentBaseResultIndex}
+              baseAudioGroupId={baseAudioGroupId}
+              baseTitle={baseResultControls}
+              className="result-file-diff-preview"
+              baseSlideDirection={baseResultSlideDirectionRef.current}
+              showHeaders={showResultControlsHeader}
+              targetActiveIndex={currentTargetResultIndex}
+              targetAudioGroupId={targetAudioGroupId}
+              targetTitle={targetResultControls}
+              targetSlideDirection={targetResultSlideDirectionRef.current}
+              baseImages={compareBaseImages}
+              targetImages={compareTargetImages}
+              emptyLabel={ui.emptyResultFile}
+            />
+          </div>
+        ) : null}
+      </div>
     </section>
   );
 }

@@ -169,8 +169,8 @@ const addMetricsToTopicUsage = (
   summary: TopicUsageSummary,
   metrics: VersionCostMetrics,
 ) => {
-  const resultCount = metrics.kind === "image" ? metrics.imageCount : 1;
-  const billableRuns = metrics.kind === "image" ? Math.max(1, resultCount) : 1;
+  const resultCount = metrics.resultCount;
+  const billableRuns = Math.max(1, resultCount);
 
   return {
     inputTokens: summary.inputTokens + metrics.inputTokens * billableRuns,

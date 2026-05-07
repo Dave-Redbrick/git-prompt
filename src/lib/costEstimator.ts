@@ -8,7 +8,13 @@ import type {
   TopicModelId,
   VersionCostSnapshot,
 } from "../types";
-import { getVersionKind, getVersionResultText } from "./promptVersions";
+import {
+  countImageResultMedia,
+  getVersionKind,
+  getVersionResultText,
+  getVersionResultTexts,
+  getVersionUserPrompt,
+} from "./promptVersions";
 
 const tokensPerTenThousandUnit = 10_000;
 
@@ -34,7 +40,7 @@ export const getInputRateParts = (model: {
   };
 };
 
-export const costEstimatorVersion = 3;
+export const costEstimatorVersion = 4;
 export type CostCurrencyLocale = "ko" | "en";
 
 export type TopicModelOption = TopicModelConfig & {
@@ -87,6 +93,8 @@ export const defaultModelIdsByKind: Record<PromptVersionKind, TopicModelId[]> = 
     "text:grok-4-1-fast-non-reasoning",
     "image:fal-ai/bytedance/seedream/v4.5/edit",
   ],
+  audio: ["text:grok-4-1-fast-non-reasoning"],
+  video: ["text:grok-4-1-fast-non-reasoning"],
 };
 
 const legacyModelSelectionIdMap = new Map<TopicModelId, TopicModelId>([
@@ -124,7 +132,17 @@ export const getModelSelectionId = (model: Pick<TopicModelConfig, "id" | "kind">
 const modelAppliesToTopicKind = (
   topicKind: PromptVersionKind,
   modelKind: TopicModelConfig["kind"],
-) => modelKind === "text" || modelKind === topicKind;
+) => {
+  if (modelKind === "text") {
+    return true;
+  }
+
+  if (topicKind === "audio") {
+    return modelKind === "voice";
+  }
+
+  return modelKind === topicKind;
+};
 
 export const modelKindOrder: Record<TopicModelConfig["kind"], number> = {
   text: 0,
@@ -260,6 +278,7 @@ export type VersionCostMetrics = {
   promptChars: number;
   promptTokens: number;
   resultChars: number;
+  resultCount: number;
   totalCostUsd: number;
   tokenDelta: number;
   versionId: string;
@@ -282,6 +301,16 @@ export const estimateTextTokens = (text: string) => {
   }, 0);
 
   return Math.max(1, Math.ceil(weightedCharacters));
+};
+
+const estimatePromptInputStats = (version: Pick<PromptVersion, "body" | "userPrompt">) => {
+  const systemPrompt = version.body;
+  const userPrompt = getVersionUserPrompt(version);
+
+  return {
+    promptChars: countTextChars(systemPrompt) + countTextChars(userPrompt),
+    promptTokens: estimateTextTokens(systemPrompt) + estimateTextTokens(userPrompt),
+  };
 };
 
 const estimateInputCost = (
@@ -402,7 +431,20 @@ export const formatSignedUsd = (value: number) =>
 const getImageCount = (
   version: PromptVersion,
   imagesByVersion: Record<string, Array<ImageAsset | DraftImage>>,
-) => imagesByVersion[version.id]?.length ?? 0;
+) => countImageResultMedia(imagesByVersion[version.id] ?? []);
+
+const getVersionResultCount = (
+  version: PromptVersion,
+  imagesByVersion: Record<string, Array<ImageAsset | DraftImage>>,
+) => {
+  const mediaCount = imagesByVersion[version.id]?.length ?? 0;
+
+  if (getVersionKind(version) === "text") {
+    return getVersionResultTexts(version).length + mediaCount;
+  }
+
+  return mediaCount;
+};
 
 const buildModelCostItems = ({
   billableImages,
@@ -534,6 +576,7 @@ const estimateVersionBaseMetrics = (
       promptChars: snapshot.promptChars,
       promptTokens: snapshot.promptTokens,
       resultChars: snapshot.resultChars,
+      resultCount: snapshot.resultCount ?? getVersionResultCount(version, imagesByVersion),
       totalCostUsd: sumCostItems(modelCostItems),
     };
   }
@@ -541,10 +584,10 @@ const estimateVersionBaseMetrics = (
   const models = version.modelIds
     ? resolveTopicModels(kind, version.modelIds, modelConfigs)
     : fallbackModels;
-  const promptChars = countTextChars(version.body);
-  const promptTokens = estimateTextTokens(version.body);
+  const { promptChars, promptTokens } = estimatePromptInputStats(version);
   const resultText = kind === "text" ? getVersionResultText(version) : "";
   const resultChars = countTextChars(resultText);
+  const resultCount = getVersionResultCount(version, imagesByVersion);
   const rawImageCount =
     kind === "image" ? getImageCount(version, imagesByVersion) : 0;
   const billableImages = getBillableImageCount(kind, rawImageCount);
@@ -572,6 +615,7 @@ const estimateVersionBaseMetrics = (
     promptChars,
     promptTokens,
     resultChars,
+    resultCount,
     totalCostUsd: sumCostItems(modelCostItems),
   };
 };
@@ -650,17 +694,20 @@ export const createCostSnapshot = (
   promptChars: metrics.promptChars,
   promptTokens: metrics.promptTokens,
   resultChars: metrics.resultChars,
+  resultCount: metrics.resultCount,
   totalCostUsd: metrics.totalCostUsd,
 });
 
 export const repriceCostSnapshotForResultCount = ({
   kind,
   rawImageCount,
+  resultCount,
   resultText,
   snapshot,
 }: {
   kind: PromptVersionKind;
   rawImageCount: number;
+  resultCount: number;
   resultText: string;
   snapshot: VersionCostSnapshot;
 }): VersionCostSnapshot => {
@@ -670,6 +717,7 @@ export const repriceCostSnapshotForResultCount = ({
     estimatorVersion: costEstimatorVersion,
     imageCount,
     resultChars: kind === "text" ? countTextChars(resultText) : 0,
+    resultCount,
   };
   const modelCostItems = repriceSnapshotModelCostItems(nextSnapshot, kind);
 
@@ -689,6 +737,9 @@ export const estimateDraftCostMetrics = ({
   modelIds,
   previousVersion,
   resultText,
+  resultTexts,
+  resultCount,
+  userPrompt,
 }: {
   body: string;
   imageCount: number;
@@ -698,8 +749,24 @@ export const estimateDraftCostMetrics = ({
   modelIds?: string[];
   previousVersion?: PromptVersion | null;
   resultText?: string;
+  resultTexts?: string[];
+  resultCount?: number;
+  userPrompt?: string;
 }): VersionCostMetrics => {
   const resolvedModels = resolveTopicModels(kind, modelIds, modelConfigs);
+  const draftResultTexts =
+    resultTexts ?? (typeof resultText === "string" ? [resultText] : []);
+  const draftResultText = getVersionResultText({
+    id: "draft-result-text",
+    topicId: "draft",
+    kind,
+    label: "draft",
+    body: "",
+    resultText,
+    resultTexts: draftResultTexts,
+    notes: "",
+    createdAt: new Date().toISOString(),
+  });
   const draftVersion: PromptVersion = {
     id: "draft",
     topicId: "draft",
@@ -707,7 +774,9 @@ export const estimateDraftCostMetrics = ({
     modelIds: resolvedModels.map((model) => getModelSelectionId(model)),
     label: "draft",
     body,
-    resultText: kind === "text" ? resultText ?? "" : "",
+    userPrompt,
+    resultText: kind === "text" ? draftResultText : "",
+    resultTexts: kind === "text" ? draftResultTexts : [],
     notes: "",
     createdAt: new Date().toISOString(),
   };
@@ -721,13 +790,18 @@ export const estimateDraftCostMetrics = ({
     })),
   };
 
-  return estimateVersionCostMetrics(
+  const metrics = estimateVersionCostMetrics(
     draftVersion,
     previousVersion ?? null,
     draftImagesByVersion,
     resolvedModels,
     modelConfigs,
   );
+
+  return {
+    ...metrics,
+    resultCount: resultCount ?? metrics.resultCount,
+  };
 };
 
 export const buildVersionCostMetrics = (

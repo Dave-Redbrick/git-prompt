@@ -1,4 +1,11 @@
-import type { ImageAsset, Project, PromptVersion, Theme, Topic } from "../types";
+import type {
+  ImageAsset,
+  Project,
+  PromptDraft,
+  PromptVersion,
+  Theme,
+  Topic,
+} from "../types";
 
 type StoreMap = {
   projects: Project;
@@ -6,12 +13,13 @@ type StoreMap = {
   topics: Topic;
   versions: PromptVersion;
   images: ImageAsset;
+  drafts: PromptDraft;
 };
 
 type StoreName = keyof StoreMap;
 
 const DB_NAME = "prompt-reinforcer";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -63,6 +71,10 @@ const openDb = () => {
         const store = db.createObjectStore("images", { keyPath: "id" });
         store.createIndex("topicId", "topicId", { unique: false });
         store.createIndex("versionId", "versionId", { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains("drafts")) {
+        db.createObjectStore("drafts", { keyPath: "topicId" });
       }
     };
   });
