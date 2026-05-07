@@ -63,6 +63,7 @@ import {
   getModelOptions,
   modelKindOrder,
   normalizeLegacyModelSelectionId,
+  repriceCostSnapshotForResultCount,
   resolveTopicModelIds,
 } from "./lib/costEstimator";
 import { diffLines } from "./lib/diff";
@@ -119,6 +120,7 @@ type FolderState = {
 };
 
 type AppearanceTheme = "light" | "dark";
+type CompareDirection = "previous" | "next";
 type SidebarView = "explorer" | "history" | "models";
 type RenameTarget = {
   kind: "project" | "theme" | "topic";
@@ -333,6 +335,8 @@ export function App() {
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [sidebarView, setSidebarView] = useState<SidebarView>("explorer");
   const [mainView, setMainView] = useState<"write" | "diff" | "cost">("write");
+  const [compareDirection, setCompareDirection] =
+    useState<CompareDirection>("previous");
   const [createPanel, setCreatePanel] = useState<
     "project" | "theme" | "topic" | null
   >(null);
@@ -371,6 +375,7 @@ export function App() {
   const [draftResultText, setDraftResultText] = useState("");
   const [draftNotes, setDraftNotes] = useState("");
   const [draftImages, setDraftImages] = useState<DraftImage[]>([]);
+  const [editingVersionId, setEditingVersionId] = useState<string | null>(null);
   const [pasteTargetActive, setPasteTargetActive] = useState(false);
   const ui = messages[locale];
   const usdKrwExchangeRate = useUsdKrwExchangeRate(locale === "ko");
@@ -857,6 +862,7 @@ export function App() {
       setDraftResultText("");
       setDraftNotes("");
       setDraftImages([]);
+      setEditingVersionId(null);
       setActiveVersionId("draft");
       setMainView("write");
       return;
@@ -874,6 +880,7 @@ export function App() {
         ? copyImagesToDraft(imagesByVersion[latestVersion.id] ?? [])
         : [],
     );
+    setEditingVersionId(null);
     setActiveVersionId("draft");
     setMainView("write");
   }, [loading, selectedTopicId, selectedTopicKind]);
@@ -883,34 +890,105 @@ export function App() {
       ? null
       : (topicVersions.find((version) => version.id === activeVersionId) ??
         null);
+  const editingVersion = editingVersionId
+    ? (topicVersions.find((version) => version.id === editingVersionId) ?? null)
+    : null;
+  const isVersionView = Boolean(selectedStoredVersion && !editingVersion);
+  const selectedStoredVersionImages = selectedStoredVersion
+    ? (imagesByVersion[selectedStoredVersion.id] ?? [])
+    : [];
+  const editorTopicKind = editingVersion
+    ? getVersionKind(editingVersion)
+    : selectedStoredVersion
+      ? getVersionKind(selectedStoredVersion)
+    : selectedTopicKind;
+  const editorModelIds =
+    editingVersion?.modelIds ??
+    selectedStoredVersion?.modelIds ??
+    selectedTopicModelIds;
+  const writePanelBody = isVersionView
+    ? (selectedStoredVersion?.body ?? "")
+    : draftBody;
+  const writePanelResultText = isVersionView
+    ? getVersionResultText(selectedStoredVersion)
+    : draftResultText;
+  const writePanelNotes = isVersionView
+    ? (selectedStoredVersion?.notes ?? "")
+    : draftNotes;
+  const writePanelLabel = isVersionView
+    ? (selectedStoredVersion?.label ?? "")
+    : draftLabel;
+  const writePanelImages = isVersionView ? selectedStoredVersionImages : draftImages;
+  const selectedStoredVersionMetrics = selectedStoredVersion
+    ? (metricsByVersion[selectedStoredVersion.id] ?? null)
+    : null;
+  const activeCostMetrics =
+    isVersionView && selectedStoredVersionMetrics
+      ? selectedStoredVersionMetrics
+      : currentDraftCostMetrics;
+  const activeCostLabel =
+    isVersionView && selectedStoredVersion
+      ? ui.selectedVersionEstimate(selectedStoredVersion.label)
+      : ui.currentDraftEstimate;
+  const editingVersionStoredImages = editingVersion
+    ? (imagesByVersion[editingVersion.id] ?? [])
+    : [];
   const selectedStoredIndex = selectedStoredVersion
     ? topicVersions.findIndex(
         (version) => version.id === selectedStoredVersion.id,
       )
     : -1;
-  const compareBase =
+  const previousStoredVersion =
     selectedStoredVersion && selectedStoredIndex > 0
       ? topicVersions[selectedStoredIndex - 1]
-      : activeVersionId === "draft"
-        ? latestVersion
-        : null;
-  const compareTargetKind = selectedTopicKind;
+      : null;
+  const nextStoredVersion =
+    selectedStoredVersion &&
+    selectedStoredIndex >= 0 &&
+    selectedStoredIndex < topicVersions.length - 1
+      ? topicVersions[selectedStoredIndex + 1]
+      : null;
+  const canCompareStoredPrevious = Boolean(previousStoredVersion);
+  const canCompareStoredNext = Boolean(nextStoredVersion);
+  const effectiveCompareDirection: CompareDirection =
+    selectedStoredVersion && compareDirection === "next"
+      ? canCompareStoredNext
+        ? "next"
+        : "previous"
+      : selectedStoredVersion && !canCompareStoredPrevious && canCompareStoredNext
+        ? "next"
+        : "previous";
+  const compareBase = selectedStoredVersion
+    ? effectiveCompareDirection === "next"
+      ? selectedStoredVersion
+      : previousStoredVersion
+    : activeVersionId === "draft"
+      ? latestVersion
+      : null;
+  const compareTargetVersion = selectedStoredVersion
+    ? effectiveCompareDirection === "next"
+      ? nextStoredVersion
+      : selectedStoredVersion
+    : null;
+  const compareTargetKind = compareTargetVersion
+    ? getVersionKind(compareTargetVersion)
+    : selectedTopicKind;
   const compareBaseText =
     compareTargetKind === "text"
       ? getVersionResultText(compareBase)
       : (compareBase?.body ?? "");
   const compareTargetText =
     compareTargetKind === "text"
-      ? selectedStoredVersion
-        ? getVersionResultText(selectedStoredVersion)
+      ? compareTargetVersion
+        ? getVersionResultText(compareTargetVersion)
         : draftResultText
-      : (selectedStoredVersion?.body ?? draftBody);
-  const compareTargetLabel = selectedStoredVersion?.label ?? ui.draftMessage;
+      : (compareTargetVersion?.body ?? draftBody);
+  const compareTargetLabel = compareTargetVersion?.label ?? ui.draftMessage;
   const compareBaseImages = compareBase
     ? (imagesByVersion[compareBase.id] ?? [])
     : [];
-  const compareTargetImages = selectedStoredVersion
-    ? (imagesByVersion[selectedStoredVersion.id] ?? [])
+  const compareTargetImages = compareTargetVersion
+    ? (imagesByVersion[compareTargetVersion.id] ?? [])
     : draftImages;
   const latestImages = latestVersion
     ? (imagesByVersion[latestVersion.id] ?? [])
@@ -934,7 +1012,7 @@ export function App() {
   const hasDraftModelChanges =
     currentDraftCostMetrics.modelAddedIds.length > 0 ||
     currentDraftCostMetrics.modelRemovedIds.length > 0;
-  const hasDraftChanges =
+  const rawDraftChanges =
     (latestVersion?.body ?? "") !== draftBody ||
     latestComparableResultText !== draftComparableResultText ||
     !draftImagesMatchStoredImages(
@@ -942,10 +1020,39 @@ export function App() {
       comparableLatestImages,
     ) ||
     hasDraftModelChanges;
+  const hasVersionEditChanges = editingVersion
+    ? (draftLabel.trim() || editingVersion.label) !== editingVersion.label ||
+      draftNotes.trim() !== editingVersion.notes ||
+      (editorTopicKind === "text" &&
+        draftResultText.trim() !== getVersionResultText(editingVersion)) ||
+      (editorTopicKind === "image" &&
+        !draftImagesMatchStoredImages(draftImages, editingVersionStoredImages))
+    : false;
+  const hasDraftChanges = !editingVersion && !isVersionView && rawDraftChanges;
   const canSaveDraft =
+    !editingVersion &&
     hasDraftChanges &&
     draftBody.trim().length > 0 &&
     (selectedTopicKind === "image" || draftResultText.trim().length > 0);
+  const canSaveVersionEdit =
+    Boolean(editingVersion) &&
+    hasVersionEditChanges &&
+    draftBody.trim().length > 0 &&
+    (editorTopicKind === "image" || draftResultText.trim().length > 0);
+  const canSaveCurrentVersion = editingVersion
+    ? canSaveVersionEdit
+    : canSaveDraft;
+
+  const markEditorChanged = () => {
+    setActiveVersionId(editingVersionId ?? "draft");
+  };
+
+  const openCurrentDraft = () => {
+    setEditingVersionId(null);
+    setActiveVersionId("draft");
+    setCompareDirection("previous");
+    setMainView("write");
+  };
 
   const refresh = async () => {
     try {
@@ -992,7 +1099,7 @@ export function App() {
     try {
       const { blob, fileName } = await createProjectArchiveZip(
         selectedProject.id,
-        store,
+        { ...store, customModels },
       );
       downloadBlob(blob, fileName);
       showToast(ui.projectExported);
@@ -1019,6 +1126,25 @@ export function App() {
       setSelectedProjectId(imported.project.id);
       setSelectedThemeId(themeId);
       setSelectedTopicId(topicId);
+      if (imported.customModels.length > 0) {
+        const incomingModels = normalizeCustomModels(
+          imported.customModels.filter(isTopicModelConfig),
+        );
+
+        setCustomModels((current) =>
+          normalizeCustomModels([
+            ...current.filter(
+              (currentModel) =>
+                !incomingModels.some(
+                  (incomingModel) =>
+                    incomingModel.kind === currentModel.kind &&
+                    incomingModel.id === currentModel.id,
+                ),
+            ),
+            ...incomingModels,
+          ]),
+        );
+      }
       setCreatePanel(null);
       setSidebarView("explorer");
       showToast(ui.projectImported(imported.project.name));
@@ -1474,7 +1600,7 @@ export function App() {
       files.map((file) => fileToDraftImage(file)),
     );
     setDraftImages((current) => [...current, ...loadedImages]);
-    setActiveVersionId("draft");
+    markEditorChanged();
     event.target.value = "";
   };
 
@@ -1501,7 +1627,7 @@ export function App() {
     );
 
     setDraftImages((current) => [...current, ...images]);
-    setActiveVersionId("draft");
+    markEditorChanged();
     showToast(ui.imagesPasted);
   };
 
@@ -1583,8 +1709,110 @@ export function App() {
         id: createId(),
       })),
     );
-    setActiveVersionId(versionId);
+    setActiveVersionId("draft");
     showToast(ui.versionSaved);
+  };
+
+  const createEditedVersionSnapshot = (
+    version: PromptVersion,
+    resultText: string,
+    rawImageCount: number,
+  ) => {
+    const kind = getVersionKind(version);
+    if (version.costSnapshot) {
+      return repriceCostSnapshotForResultCount({
+        kind,
+        rawImageCount,
+        resultText,
+        snapshot: version.costSnapshot,
+      });
+    }
+
+    const metrics = estimateDraftCostMetrics({
+      body: version.body,
+      imageCount: rawImageCount,
+      imagesByVersion,
+      kind,
+      modelConfigs: customModels,
+      modelIds: version.modelIds ?? selectedTopicModelIds,
+      previousVersion: null,
+      resultText,
+    });
+
+    return createCostSnapshot(metrics);
+  };
+
+  const handleVersionEditSave = async () => {
+    if (!editingVersion || !selectedTopic) {
+      return;
+    }
+
+    const kind = getVersionKind(editingVersion);
+    const resultText = draftResultText.trim();
+    if (kind === "text" && !resultText) {
+      showToast(ui.enterPromptResult, "error");
+      return;
+    }
+
+    const savedAt = nowIso();
+    const imagesToSave = kind === "image" ? draftImages : [];
+    const existingImageMap = new Map(
+      store.images
+        .filter((image) => image.versionId === editingVersion.id)
+        .map((image) => [image.id, image]),
+    );
+    const existingImageIds = store.images
+      .filter((image) => image.versionId === editingVersion.id)
+      .map((image) => image.id);
+    const nextVersion = {
+      ...editingVersion,
+      costSnapshot: createEditedVersionSnapshot(
+        editingVersion,
+        resultText,
+        imagesToSave.length,
+      ),
+      label: draftLabel.trim() || editingVersion.label,
+      notes: draftNotes.trim(),
+      resultText: kind === "text" ? resultText : "",
+    };
+
+    await putItem("versions", nextVersion);
+    await Promise.all(existingImageIds.map((id) => deleteItem("images", id)));
+    await Promise.all(
+      imagesToSave.map((image) => {
+        const { name, type, dataUrl } = image;
+        const id = image.sourceId ?? image.id;
+        const existingImage = existingImageMap.get(id);
+
+        return putItem("images", {
+          id,
+          name,
+          type,
+          dataUrl,
+          topicId: selectedTopic.id,
+          versionId: editingVersion.id,
+          createdAt: existingImage?.createdAt ?? savedAt,
+        });
+      }),
+    );
+
+    await refresh();
+    setDraftLabel(nextVersion.label);
+    setDraftKind(kind);
+    setDraftBody(nextVersion.body);
+    setDraftResultText(getVersionResultText(nextVersion));
+    setDraftNotes(nextVersion.notes);
+    setDraftImages(
+      imagesToSave.map((image) => ({
+        ...image,
+        sourceId: image.sourceId ?? image.id,
+        id: createId(),
+      })),
+    );
+    setEditingVersionId(null);
+    setActiveVersionId(editingVersion.id);
+    setMainView("write");
+    showToast(ui.versionUpdated);
   };
 
   const handleVersionDelete = (versionId: string) => {
@@ -1598,6 +1826,27 @@ export function App() {
       confirmLabel: ui.delete,
       onConfirm: () => deleteVersion(versionId),
     });
+  };
+
+  const toggleGoodResult = async (version: PromptVersion) => {
+    const nextVersion = {
+      ...version,
+      isGoodResult: !version.isGoodResult,
+    };
+
+    setStore((current) => ({
+      ...current,
+      versions: current.versions.map((item) =>
+        item.id === version.id ? nextVersion : item,
+      ),
+    }));
+    await putItem("versions", nextVersion);
+    await refresh();
+    showToast(
+      nextVersion.isGoodResult
+        ? ui.goodResultMarked(version.label)
+        : ui.goodResultUnmarked(version.label),
+    );
   };
 
   const deleteVersion = async (versionId: string) => {
@@ -1626,34 +1875,27 @@ export function App() {
         ? copyImagesToDraft(imagesByVersion[remainingLatest.id] ?? [])
         : [],
     );
+    if (editingVersionId === versionId) {
+      setEditingVersionId(null);
+    }
     await refresh();
     setActiveVersionId("draft");
     showToast(ui.versionDeleted);
   };
 
-  const continueFromVersion = (version: PromptVersion) => {
-    setDraftLabel(`v${topicVersions.length + 1}`);
-    setDraftKind(selectedTopicKind);
-    setDraftBody(version.body);
-    setDraftResultText(getVersionResultText(version));
-    setDraftNotes("");
-    setDraftImages(
-      getVersionKind(version) === "image"
-        ? copyImagesToDraft(imagesByVersion[version.id] ?? [])
-        : [],
-    );
-    if (version.modelIds?.length) {
-      void updateSelectedTopicModels(version.modelIds);
-    }
-    setActiveVersionId("draft");
-    setMainView("write");
+  const checkoutVersion = (version: PromptVersion) => {
+    setEditingVersionId(null);
+    setActiveVersionId(version.id);
+    setCompareDirection("previous");
+    setMainView("diff");
   };
 
   const cherryPickVersion = (version: PromptVersion) => {
+    setEditingVersionId(null);
     setDraftKind(selectedTopicKind);
     setDraftBody(version.body);
     setDraftResultText(getVersionResultText(version));
-    setDraftNotes(`cherry-pick: ${version.label}`);
+    setDraftNotes(`${ui.cherryPick}: ${version.label}`);
     setDraftImages(
       getVersionKind(version) === "image"
         ? copyImagesToDraft(imagesByVersion[version.id] ?? [])
@@ -1665,6 +1907,40 @@ export function App() {
     setActiveVersionId("draft");
     setMainView("write");
     showToast(ui.cherryPickApplied(version.label));
+  };
+
+  const editVersion = (version: PromptVersion) => {
+    const kind = getVersionKind(version);
+
+    setEditingVersionId(version.id);
+    setDraftLabel(version.label);
+    setDraftKind(kind);
+    setDraftBody(version.body);
+    setDraftResultText(getVersionResultText(version));
+    setDraftNotes(version.notes);
+    setDraftImages(
+      kind === "image" ? copyImagesToDraft(imagesByVersion[version.id] ?? []) : [],
+    );
+    setActiveVersionId(version.id);
+    setMainView("write");
+  };
+
+  const cancelVersionEdit = () => {
+    setEditingVersionId(null);
+    setDraftLabel(
+      latestVersion ? `v${topicVersions.length + 1}` : ui.draftLabel,
+    );
+    setDraftKind(selectedTopicKind);
+    setDraftBody(latestVersion?.body ?? "");
+    setDraftResultText(getVersionResultText(latestVersion));
+    setDraftNotes("");
+    setDraftImages(
+      latestVersion && getVersionKind(latestVersion) === "image"
+        ? copyImagesToDraft(imagesByVersion[latestVersion.id] ?? [])
+        : [],
+    );
+    setActiveVersionId("draft");
+    setMainView("write");
   };
 
   if (loading) {
@@ -1684,7 +1960,7 @@ export function App() {
       : ui.selectTopic;
 
   const selectedTopicModelOptions = selectedTopic
-    ? getModelOptions(selectedTopicKind, customModels).map((option) => ({
+    ? getModelOptions(editorTopicKind, customModels).map((option) => ({
         description: [option.provider, option.memo].filter(Boolean).join(" · "),
         displayLabel: getModelDisplayName(option.id),
         group: ui.modelUse(option.kind),
@@ -1809,17 +2085,23 @@ export function App() {
         metricsByVersion={metricsByVersion}
         ui={ui}
         usdKrwRate={usdKrwExchangeRate?.rate ?? null}
-        onCheckout={continueFromVersion}
+        onCheckout={checkoutVersion}
         onCherryPick={cherryPickVersion}
         onDelete={handleVersionDelete}
+        onEdit={editVersion}
         onOpenDraftDiff={() => {
+          setEditingVersionId(null);
           setActiveVersionId("draft");
+          setCompareDirection("previous");
           setMainView("diff");
         }}
         onOpenVersionDiff={(versionId) => {
+          setEditingVersionId(null);
           setActiveVersionId(versionId);
+          setCompareDirection("previous");
           setMainView("diff");
         }}
+        onToggleGoodResult={(version) => void toggleGoodResult(version)}
       />
     </div>
   );
@@ -2597,15 +2879,42 @@ export function App() {
                 <h2>{selectedTopic.title}</h2>
                 {selectedTopic.brief ? <p>{selectedTopic.brief}</p> : null}
               </div>
-              <button
-                type="button"
-                className="primary-button"
-                onClick={handleVersionSave}
-                disabled={!canSaveDraft}
-              >
-                <Save aria-hidden="true" size={17} />
-                {ui.saveVersion}
-              </button>
+              <div className="workspace-actions">
+                {isVersionView ? (
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={openCurrentDraft}
+                  >
+                    <FileText aria-hidden="true" size={15} />
+                    {ui.currentDraft}
+                  </button>
+                ) : null}
+                {editingVersion ? (
+                  <button
+                    type="button"
+                    className="icon-button"
+                    onClick={cancelVersionEdit}
+                    aria-label={ui.cancelVersionEdit}
+                    title={ui.cancelVersionEdit}
+                  >
+                    <X aria-hidden="true" size={18} strokeWidth={2.6} />
+                  </button>
+                ) : null}
+                {isVersionView ? null : (
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={
+                      editingVersion ? handleVersionEditSave : handleVersionSave
+                    }
+                    disabled={!canSaveCurrentVersion}
+                  >
+                    <Save aria-hidden="true" size={17} />
+                    {editingVersion ? ui.saveVersionEdit : ui.saveVersion}
+                  </button>
+                )}
+              </div>
             </header>
 
             <nav className="workspace-tabs" aria-label={ui.workspaceTabsAria}>
@@ -2650,33 +2959,37 @@ export function App() {
             >
               {mainView === "write" ? (
                 <WritePanel
-                  draftBody={draftBody}
-                  draftImages={draftImages}
-                  draftLabel={draftLabel}
-                  draftNotes={draftNotes}
-                  draftResultText={draftResultText}
+                  draftBody={writePanelBody}
+                  draftImages={writePanelImages}
+                  draftLabel={writePanelLabel}
+                  draftNotes={writePanelNotes}
+                  draftResultText={writePanelResultText}
+                  isVersionEdit={Boolean(editingVersion)}
+                  isVersionView={isVersionView}
                   modelOptions={selectedTopicModelOptions}
                   pasteTargetActive={pasteTargetActive}
-                  previousBody={latestVersion?.body ?? ""}
-                  previousResultText={getVersionResultText(latestVersion)}
-                  selectedModelIds={selectedTopicModelIds}
-                  selectedTopicKind={selectedTopicKind}
+                  previousBody={editingVersion?.body ?? latestVersion?.body ?? ""}
+                  previousResultText={getVersionResultText(
+                    editingVersion ?? latestVersion,
+                  )}
+                  selectedModelIds={editorModelIds}
+                  selectedTopicKind={editorTopicKind}
                   ui={ui}
                   onDraftBodyChange={(value) => {
                     setDraftBody(value);
-                    setActiveVersionId("draft");
+                    markEditorChanged();
                   }}
                   onDraftLabelChange={(value) => {
                     setDraftLabel(value);
-                    setActiveVersionId("draft");
+                    markEditorChanged();
                   }}
                   onDraftNotesChange={(value) => {
                     setDraftNotes(value);
-                    setActiveVersionId("draft");
+                    markEditorChanged();
                   }}
                   onDraftResultTextChange={(value) => {
                     setDraftResultText(value);
-                    setActiveVersionId("draft");
+                    markEditorChanged();
                   }}
                   onImagePaste={handleImagePaste}
                   onImageUpload={handleImageUpload}
@@ -2684,28 +2997,41 @@ export function App() {
                     void updateSelectedTopicModels(value)
                   }
                   onPasteTargetActiveChange={setPasteTargetActive}
-                  onRemoveDraftImage={(imageId) =>
+                  onRemoveDraftImage={(imageId) => {
                     setDraftImages((current) =>
                       current.filter((item) => item.id !== imageId),
-                    )
-                  }
+                    );
+                    markEditorChanged();
+                  }}
                 />
               ) : mainView === "diff" ? (
                 <DiffPanel
                   addedCount={addedCount}
+                  canCompareNext={canCompareStoredNext}
+                  canComparePrevious={canCompareStoredPrevious}
                   compareBase={compareBase}
                   compareBaseImages={compareBaseImages}
+                  compareDirection={effectiveCompareDirection}
                   compareTargetImages={compareTargetImages}
                   compareTargetKind={compareTargetKind}
                   compareTargetLabel={compareTargetLabel}
+                  compareTargetVersion={compareTargetVersion}
                   lineDiffRows={lineDiffRows}
                   removedCount={removedCount}
+                  showCompareControls={Boolean(
+                    selectedStoredVersion &&
+                      (canCompareStoredPrevious || canCompareStoredNext),
+                  )}
                   ui={ui}
+                  onCompareDirectionChange={setCompareDirection}
+                  onToggleGoodResult={(version) => void toggleGoodResult(version)}
                 />
               ) : (
                 <CostTrendPanel
-                  currentMetrics={currentDraftCostMetrics}
+                  activeCostLabel={activeCostLabel}
+                  currentMetrics={activeCostMetrics}
                   exchangeRate={usdKrwExchangeRate}
+                  includeDraftInTopicUsage={canSaveDraft && !isVersionView}
                   locale={locale}
                   metricsByVersion={metricsByVersion}
                   topicVersions={topicVersions}

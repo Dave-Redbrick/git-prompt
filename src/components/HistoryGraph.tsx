@@ -1,13 +1,14 @@
-import { ChevronDown, CircleDot, GitBranch } from "lucide-react";
+import { ChevronDown, GitBranch, Star } from "lucide-react";
 import type { PromptVersion, Topic } from "../types";
 import type { Locale, UiMessages } from "../i18n";
 import {
+  formatCurrency,
   formatSignedNumber,
-  formatSignedCurrency,
   getModelDisplayName,
   type VersionCostMetrics,
 } from "../lib/costEstimator";
 import { getCommitMemo } from "../lib/promptVersions";
+import { StarToggleButton } from "./StarToggleButton";
 
 const getSignedClass = (value: number) =>
   value > 0 ? "up" : value < 0 ? "down" : "flat";
@@ -28,8 +29,10 @@ type HistoryGraphProps = {
   onCheckout: (version: PromptVersion) => void;
   onCherryPick: (version: PromptVersion) => void;
   onDelete: (versionId: string) => void;
+  onEdit: (version: PromptVersion) => void;
   onOpenDraftDiff: () => void;
   onOpenVersionDiff: (versionId: string) => void;
+  onToggleGoodResult: (version: PromptVersion) => void;
 };
 
 export function HistoryGraph({
@@ -45,8 +48,10 @@ export function HistoryGraph({
   onCheckout,
   onCherryPick,
   onDelete,
+  onEdit,
   onOpenDraftDiff,
   onOpenVersionDiff,
+  onToggleGoodResult,
 }: HistoryGraphProps) {
   if (!selectedTopic) {
     return (
@@ -82,7 +87,6 @@ export function HistoryGraph({
                   {ui.draftMessage}
                 </button>
                 <span className="branch-pill">
-                  <CircleDot aria-hidden="true" size={14} />
                   {ui.currentVersion}
                 </span>
               </div>
@@ -100,16 +104,28 @@ export function HistoryGraph({
             const isLatest =
               index === 0 && !(activeVersionId === "draft" && hasDraftChanges);
             const metrics = metricsByVersion[version.id];
+            const isGoodResult = Boolean(version.isGoodResult);
+
             return (
               <article
                 key={version.id}
-                className={`graph-row ${isActive ? "active" : ""}`}
+                className={`graph-row ${isActive ? "active" : ""} ${isGoodResult ? "good-result" : ""}`}
               >
                 <div className="graph-rail">
                   <span
                     className={`graph-line top ${isLatest ? "hidden" : ""}`}
                   />
-                  <span className="graph-node filled" />
+                  <span className={`graph-node-wrap ${isGoodResult ? "good" : ""}`}>
+                    <span className="graph-node filled" />
+                    {isGoodResult ? (
+                      <Star
+                        aria-label={ui.goodResult}
+                        className="graph-node-star"
+                        fill="currentColor"
+                        size={9}
+                      />
+                    ) : null}
+                  </span>
                   <span
                     className={`graph-line bottom ${
                       index === reversedVersions.length - 1 ? "hidden" : ""
@@ -118,6 +134,12 @@ export function HistoryGraph({
                 </div>
                 <div className="graph-content">
                   <div className="graph-line-row">
+                    <StarToggleButton
+                      checked={isGoodResult}
+                      className="graph-inline-star-toggle borderless-star-toggle"
+                      ui={ui}
+                      onClick={() => onToggleGoodResult(version)}
+                    />
                     <button
                       type="button"
                       className="graph-message"
@@ -127,7 +149,6 @@ export function HistoryGraph({
                     </button>
                     {isLatest ? (
                       <span className="branch-pill">
-                        <CircleDot aria-hidden="true" size={14} />
                         {ui.currentVersion}
                       </span>
                     ) : null}
@@ -146,8 +167,8 @@ export function HistoryGraph({
                         <span className={getSignedClass(metrics.tokenDelta)}>
                           {ui.graphTokens(formatSignedNumber(metrics.tokenDelta))}
                         </span>
-                        <span className={getSignedClass(metrics.costDeltaUsd)}>
-                          {ui.graphCost(formatSignedCurrency(metrics.costDeltaUsd, locale, usdKrwRate))}
+                        <span>
+                          {ui.graphCost(formatCurrency(metrics.totalCostUsd, locale, usdKrwRate))}
                         </span>
                       </div>
                       {hasModelChanges(metrics) ? (
@@ -173,6 +194,9 @@ export function HistoryGraph({
                     </button>
                     <button type="button" onClick={() => onCherryPick(version)}>
                       {ui.cherryPick}
+                    </button>
+                    <button type="button" onClick={() => onEdit(version)}>
+                      {ui.edit}
                     </button>
                     <button type="button" onClick={() => onDelete(version.id)}>
                       {ui.delete}

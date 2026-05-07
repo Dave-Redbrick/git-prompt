@@ -1,4 +1,4 @@
-import { ChartNoAxesColumnIncreasing } from "lucide-react";
+import { ChartNoAxesColumnIncreasing, Star } from "lucide-react";
 import type { ReactNode } from "react";
 import {
   CartesianGrid,
@@ -13,7 +13,6 @@ import type { Locale, UiMessages } from "../i18n";
 import {
   formatSignedNumber,
   formatCurrency,
-  formatSignedCurrency,
   getInputRateParts,
   getModelDisplayName,
   type VersionCostMetrics,
@@ -30,6 +29,37 @@ const renderModelCode = (modelId: string) => (
     {getModelDisplayName(modelId)}
   </code>
 );
+
+type CostChartDotProps = {
+  cx?: number;
+  cy?: number;
+  payload?: { isGoodResult?: boolean };
+};
+
+const CostChartDot = ({ cx, cy, payload }: CostChartDotProps) => {
+  if (typeof cx !== "number" || typeof cy !== "number") {
+    return null;
+  }
+
+  if (payload?.isGoodResult) {
+    return (
+      <g transform={`translate(${cx}, ${cy})`} className="trend-chart-good-dot">
+        <circle r={7} />
+        <Star
+          aria-hidden="true"
+          fill="currentColor"
+          height={10}
+          viewBox="0 0 24 24"
+          width={10}
+          x={-5}
+          y={-5}
+        />
+      </g>
+    );
+  }
+
+  return <circle className="trend-chart-dot" cx={cx} cy={cy} r={4} />;
+};
 
 const hasModelChanges = (metrics: VersionCostMetrics) =>
   metrics.modelAddedIds.length > 0 || metrics.modelRemovedIds.length > 0;
@@ -105,17 +135,59 @@ const renderCostFormula = (
 };
 
 type CostTrendPanelProps = {
+  activeCostLabel: string;
   currentMetrics: VersionCostMetrics;
   exchangeRate: UsdKrwExchangeRate | null;
+  includeDraftInTopicUsage: boolean;
   locale: Locale;
   metricsByVersion: Record<string, VersionCostMetrics>;
   topicVersions: PromptVersion[];
   ui: UiMessages;
 };
 
+type TopicUsageSummary = {
+  inputTokens: number;
+  promptChars: number;
+  promptTokens: number;
+  resultChars: number;
+  resultCount: number;
+  runCount: number;
+  totalCostUsd: number;
+};
+
+const emptyTopicUsage: TopicUsageSummary = {
+  inputTokens: 0,
+  promptChars: 0,
+  promptTokens: 0,
+  resultChars: 0,
+  resultCount: 0,
+  runCount: 0,
+  totalCostUsd: 0,
+};
+
+const addMetricsToTopicUsage = (
+  summary: TopicUsageSummary,
+  metrics: VersionCostMetrics,
+) => {
+  const resultCount = metrics.kind === "image" ? metrics.imageCount : 1;
+  const billableRuns = metrics.kind === "image" ? Math.max(1, resultCount) : 1;
+
+  return {
+    inputTokens: summary.inputTokens + metrics.inputTokens * billableRuns,
+    promptChars: summary.promptChars + metrics.promptChars,
+    promptTokens: summary.promptTokens + metrics.promptTokens,
+    resultChars: summary.resultChars + metrics.resultChars,
+    resultCount: summary.resultCount + resultCount,
+    runCount: summary.runCount + 1,
+    totalCostUsd: summary.totalCostUsd + metrics.totalCostUsd * billableRuns,
+  };
+};
+
 export function CostTrendPanel({
+  activeCostLabel,
   currentMetrics,
   exchangeRate,
+  includeDraftInTopicUsage,
   locale,
   metricsByVersion,
   topicVersions,
@@ -124,13 +196,33 @@ export function CostTrendPanel({
   const usdKrwRate = exchangeRate?.rate ?? null;
   const formatCost = (valueUsd: number) =>
     formatCurrency(valueUsd, locale, usdKrwRate);
-  const formatSignedCost = (valueUsd: number) =>
-    formatSignedCurrency(valueUsd, locale, usdKrwRate);
   const trendRows = topicVersions
     .map((version) => ({ metrics: metricsByVersion[version.id], version }))
     .filter((row): row is { metrics: VersionCostMetrics; version: PromptVersion } =>
       Boolean(row.metrics),
     );
+  const savedTopicUsage = trendRows.reduce(
+    (summary, row) => addMetricsToTopicUsage(summary, row.metrics),
+    emptyTopicUsage,
+  );
+  const topicUsage = includeDraftInTopicUsage
+    ? addMetricsToTopicUsage(savedTopicUsage, currentMetrics)
+    : savedTopicUsage;
+  const firstTrackedMetrics =
+    trendRows[0]?.metrics ?? (includeDraftInTopicUsage ? currentMetrics : null);
+  const latestTrackedMetrics = includeDraftInTopicUsage
+    ? currentMetrics
+    : (trendRows[trendRows.length - 1]?.metrics ?? null);
+  const hasImprovementDelta =
+    Boolean(firstTrackedMetrics && latestTrackedMetrics) && topicUsage.runCount > 1;
+  const promptCharDelta =
+    firstTrackedMetrics && latestTrackedMetrics
+      ? latestTrackedMetrics.promptChars - firstTrackedMetrics.promptChars
+      : 0;
+  const promptTokenDelta =
+    firstTrackedMetrics && latestTrackedMetrics
+      ? latestTrackedMetrics.promptTokens - firstTrackedMetrics.promptTokens
+      : 0;
   const latestTrendRows = [...trendRows].reverse();
   const maxCost = Math.max(
     0.000001,
@@ -138,148 +230,199 @@ export function CostTrendPanel({
   );
   const chartData = trendRows.map(({ metrics, version }, index) => ({
     cost: metrics.totalCostUsd,
+    isGoodResult: Boolean(version.isGoodResult),
     label: version.label,
     order: index + 1,
-    tokens: metrics.promptTokens,
+    tokens: metrics.inputTokens,
   }));
 
   return (
     <section className="panel cost-panel">
-      <div className="panel-heading">
-        <h3>{ui.estimatedCostTrend}</h3>
-      </div>
-
-      <article className="current-cost-card">
-        <div>
-          <strong>{ui.currentDraftEstimate}</strong>
-          <span>{renderCostFormula(currentMetrics, ui, locale, usdKrwRate)}</span>
+      <section className="cost-section">
+        <div className="panel-heading">
+          <h3>{ui.singleRequestCost}</h3>
         </div>
-        <div className="current-cost-metrics">
-          <span>
-            {ui.changeDelta(
-              currentMetrics.promptChars.toLocaleString(),
-              currentMetrics.promptTokens.toLocaleString(),
-            )}
-          </span>
-          <span className={getSignedClass(currentMetrics.costDeltaUsd)}>
-            {ui.costDelta(formatSignedCost(currentMetrics.costDeltaUsd))}
-          </span>
+
+        <article className="current-cost-card">
+          <div>
+            <strong>{activeCostLabel}</strong>
+            <span>{renderCostFormula(currentMetrics, ui, locale, usdKrwRate)}</span>
+          </div>
+          <div className="current-cost-metrics">
+            <span>
+              {ui.changeDelta(
+                currentMetrics.promptChars.toLocaleString(),
+                currentMetrics.promptTokens.toLocaleString(),
+              )}
+            </span>
+          </div>
+          {renderModelChanges(currentMetrics, ui)}
+        </article>
+
+        <div className="cost-note">
+          <span>{ui.costEstimateNote}</span>
+          {locale === "ko" && exchangeRate ? (
+            <span>
+              {exchangeRate.fallback
+                ? ui.exchangeRateFallbackInfo(
+                    exchangeRate.rate.toLocaleString("ko-KR", {
+                      maximumFractionDigits: 2,
+                    }),
+                  )
+                : ui.exchangeRateInfo(
+                    exchangeRate.rate.toLocaleString("ko-KR", {
+                      maximumFractionDigits: 2,
+                    }),
+                    exchangeRate.date,
+                  )}
+            </span>
+          ) : null}
         </div>
-        {renderModelChanges(currentMetrics, ui)}
-      </article>
 
-      <div className="cost-note">
-        <span>{ui.costEstimateNote}</span>
-        {locale === "ko" && exchangeRate ? (
-          <span>
-            {exchangeRate.fallback
-              ? ui.exchangeRateFallbackInfo(
-                  exchangeRate.rate.toLocaleString("ko-KR", {
-                    maximumFractionDigits: 2,
-                  }),
-                )
-              : ui.exchangeRateInfo(
-                  exchangeRate.rate.toLocaleString("ko-KR", {
-                    maximumFractionDigits: 2,
-                  }),
-                  exchangeRate.date,
-                )}
-          </span>
-        ) : null}
-      </div>
+        <div className="trend-card">
+          <div className="trend-card-title">
+            <ChartNoAxesColumnIncreasing aria-hidden="true" size={16} />
+            <span>{ui.estimatedCostTrend}</span>
+          </div>
+          {trendRows.length > 0 ? (
+            <>
+              <div className="trend-chart" aria-label={ui.estimatedCostTrend}>
+                <ResponsiveContainer width="100%" height={240}>
+                  <LineChart data={chartData} margin={{ left: 8, right: 18, top: 18, bottom: 8 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis
+                      dataKey="label"
+                      tickLine={false}
+                      axisLine={false}
+                      tickMargin={8}
+                    />
+                    <YAxis
+                      tickLine={false}
+                      axisLine={false}
+                      width={72}
+                      tickFormatter={(value) => formatCost(Number(value))}
+                    />
+                    <Tooltip
+                      formatter={(value, name) =>
+                        name === "cost"
+                          ? [formatCost(Number(value)), ui.costTab]
+                          : [Number(value).toLocaleString(), String(name)]
+                      }
+                      labelFormatter={(label) => String(label)}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="cost"
+                      stroke="#2f80ed"
+                      strokeWidth={3}
+                      dot={<CostChartDot />}
+                      activeDot={<CostChartDot />}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="trend-list">
+                {latestTrendRows.map(({ metrics, version }) => {
+                  const barWidth = `${Math.max(4, (metrics.totalCostUsd / maxCost) * 100)}%`;
+                  const changeClass = getSignedClass(metrics.charDelta || metrics.tokenDelta);
 
-      <div className="trend-card">
-        <div className="trend-card-title">
-          <ChartNoAxesColumnIncreasing aria-hidden="true" size={16} />
-          <span>{ui.versionTrend}</span>
-        </div>
-        {trendRows.length > 0 ? (
-          <>
-            <div className="trend-chart" aria-label={ui.versionTrend}>
-              <ResponsiveContainer width="100%" height={240}>
-                <LineChart data={chartData} margin={{ left: 8, right: 18, top: 18, bottom: 8 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis
-                    dataKey="label"
-                    tickLine={false}
-                    axisLine={false}
-                    tickMargin={8}
-                  />
-                  <YAxis
-                    tickLine={false}
-                    axisLine={false}
-                    width={72}
-                    tickFormatter={(value) => formatCost(Number(value))}
-                  />
-                  <Tooltip
-                    formatter={(value, name) =>
-                      name === "cost"
-                        ? [formatCost(Number(value)), ui.costTab]
-                        : [Number(value).toLocaleString(), String(name)]
-                    }
-                    labelFormatter={(label) => String(label)}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="cost"
-                    stroke="#2f80ed"
-                    strokeWidth={3}
-                    dot={{ r: 4 }}
-                    activeDot={{ r: 6 }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-            <div className="trend-list">
-              {latestTrendRows.map(({ metrics, version }) => {
-                const barWidth = `${Math.max(4, (metrics.totalCostUsd / maxCost) * 100)}%`;
-                const directionClass = getSignedClass(metrics.costDeltaUsd);
-
-                return (
-                  <article key={version.id} className="trend-row">
-                    <div className="trend-row-head">
-                      <div>
-                        <strong>{version.label}</strong>
-                        <span>{getCommitMemo(version.notes, ui.commitMemoFallback)}</span>
+                  return (
+                    <article key={version.id} className="trend-row">
+                      <div className="trend-row-head">
+                        <div>
+                          <strong>
+                            {version.isGoodResult ? (
+                              <Star
+                                aria-label={ui.goodResult}
+                                className="trend-version-star"
+                                fill="currentColor"
+                                size={13}
+                              />
+                            ) : null}
+                            {version.label}
+                          </strong>
+                          <span>
+                            {getCommitMemo(version.notes, ui.commitMemoFallback)}
+                          </span>
+                        </div>
+                        <b>{formatCost(metrics.totalCostUsd)}</b>
                       </div>
-                      <b>{formatCost(metrics.totalCostUsd)}</b>
-                    </div>
-                    <div className="trend-cost-formula">
-                      {renderCostFormula(metrics, ui, locale, usdKrwRate)}
-                    </div>
-                    <div className="trend-bar-track">
-                      <span
-                        className={`trend-bar ${directionClass}`}
-                        style={{ width: barWidth }}
-                      />
-                    </div>
-                    <div className="trend-metrics">
-                      <span>
-                        {ui.changeDelta(
-                          metrics.promptChars.toLocaleString(),
-                          metrics.promptTokens.toLocaleString(),
-                        )}
-                      </span>
-                      <span className={directionClass}>
-                        {ui.costDelta(formatSignedCost(metrics.costDeltaUsd))}
-                      </span>
-                      <span className={getSignedClass(metrics.charDelta || metrics.tokenDelta)}>
-                        {ui.changeDelta(
-                          formatSignedNumber(metrics.charDelta),
-                          formatSignedNumber(metrics.tokenDelta),
-                        )}
-                      </span>
-                    </div>
-                    {renderModelChanges(metrics, ui)}
-                  </article>
-                );
-              })}
+                      <div className="trend-cost-formula">
+                        {renderCostFormula(metrics, ui, locale, usdKrwRate)}
+                      </div>
+                      <div className="trend-bar-track">
+                        <span
+                          className="trend-bar"
+                          style={{ width: barWidth }}
+                        />
+                      </div>
+                      <div className="trend-metrics">
+                        <span>
+                          {ui.changeDelta(
+                            metrics.promptChars.toLocaleString(),
+                            metrics.promptTokens.toLocaleString(),
+                          )}
+                        </span>
+                        <span className={changeClass}>
+                          {ui.changeDelta(
+                            formatSignedNumber(metrics.charDelta),
+                            formatSignedNumber(metrics.tokenDelta),
+                          )}
+                        </span>
+                      </div>
+                      {renderModelChanges(metrics, ui)}
+                    </article>
+                  );
+                })}
+              </div>
+            </>
+          ) : (
+            <div className="empty-commit-log">{ui.noTrendData}</div>
+          )}
+        </div>
+      </section>
+
+      <section className="cost-section">
+        <div className="panel-heading">
+          <h3>{ui.overallStats}</h3>
+        </div>
+
+        <article className="topic-usage-card">
+          <div className="topic-usage-main">
+            <div>
+              <strong>{ui.topicTestUsage}</strong>
+              <span>
+                {includeDraftInTopicUsage
+                  ? ui.topicUsageIncludingDraft
+                  : ui.topicUsageSavedOnly}
+              </span>
             </div>
-          </>
-        ) : (
-          <div className="empty-commit-log">{ui.noTrendData}</div>
-        )}
-      </div>
+            <b>{formatCost(topicUsage.totalCostUsd)}</b>
+          </div>
+          <div className="topic-usage-metrics">
+            <span>{ui.topicUsageTests(topicUsage.runCount.toLocaleString())}</span>
+            <span>{ui.topicUsageResults(topicUsage.resultCount.toLocaleString())}</span>
+            <span>
+              {ui.topicUsageInputTokens(topicUsage.inputTokens.toLocaleString())}
+            </span>
+            <span>{ui.topicUsagePromptChars(topicUsage.promptChars.toLocaleString())}</span>
+            {topicUsage.resultChars > 0 ? (
+              <span>{ui.topicUsageResultChars(topicUsage.resultChars.toLocaleString())}</span>
+            ) : null}
+          </div>
+          {hasImprovementDelta ? (
+            <div className="topic-improvement-metrics">
+              <span>{ui.topicImprovementFromFirst}</span>
+              <span className={getSignedClass(promptCharDelta || promptTokenDelta)}>
+                {ui.changeDelta(
+                  formatSignedNumber(promptCharDelta),
+                  formatSignedNumber(promptTokenDelta),
+                )}
+              </span>
+            </div>
+          ) : null}
+        </article>
+      </section>
     </section>
   );
 }

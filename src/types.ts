@@ -34,7 +34,9 @@ export type CostSnapshotModelItem = {
   modelId: TopicModelId;
   provider: string;
   role: TopicModelRole;
+  runCount?: number;
   tokenCount?: number;
+  tokensPerRun?: number;
   type: "input" | "image";
 };
 
@@ -83,6 +85,7 @@ export type PromptVersion = {
   kind?: PromptVersionKind;
   modelIds?: TopicModelId[];
   costSnapshot?: VersionCostSnapshot;
+  isGoodResult?: boolean;
   label: string;
   body: string;
   resultText?: string;

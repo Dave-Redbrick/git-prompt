@@ -11,6 +11,7 @@ export type TagPopoverOption = {
 
 type TagPopoverSelectProps = {
   addLabel: string;
+  disabled?: boolean;
   emptyLabel: string;
   label: string;
   onChange: (value: string[]) => void;
@@ -22,6 +23,7 @@ type TagPopoverSelectProps = {
 
 export function TagPopoverSelect({
   addLabel,
+  disabled = false,
   emptyLabel,
   label,
   onChange,
@@ -88,8 +90,14 @@ export function TagPopoverSelect({
   }, [open]);
 
   const commitValue = (nextValue: string[]) => {
-    if (nextValue.length > 0) {
+    if (!disabled && nextValue.length > 0) {
       onChange(nextValue);
+    }
+  };
+
+  const toggleOpen = () => {
+    if (!disabled) {
+      setOpen((current) => !current);
     }
   };
 
@@ -109,16 +117,17 @@ export function TagPopoverSelect({
     <div className="tag-popover-field" ref={rootRef}>
       <span className="tag-popover-label">{label}</span>
       <div
-        className={`tag-popover-trigger ${open ? "open" : ""}`}
-        onClick={() => setOpen((current) => !current)}
+        className={`tag-popover-trigger ${open ? "open" : ""} ${disabled ? "disabled" : ""}`}
+        onClick={toggleOpen}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
-            setOpen((current) => !current);
+            toggleOpen();
           }
         }}
+        aria-disabled={disabled}
         role="button"
-        tabIndex={0}
+        tabIndex={disabled ? -1 : 0}
         aria-expanded={open}
       >
         <span className="selected-model-tags">
@@ -132,6 +141,7 @@ export function TagPopoverSelect({
                 <button
                   type="button"
                   className="model-tag-remove"
+                  disabled={disabled}
                   aria-label={removeLabel(option.label)}
                   onClick={(event) => {
                     event.stopPropagation();

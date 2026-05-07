@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { LineDiffRow } from "../lib/diff";
 import type { DraftImage, ImageAsset } from "../types";
 
@@ -5,10 +6,10 @@ type DiffSide = "left" | "right";
 
 type SplitDiffFilesProps = {
   ariaLabel: string;
-  baseTitle: string;
+  baseTitle: ReactNode;
   emptyLabel: string;
   rows: LineDiffRow[];
-  targetTitle: string;
+  targetTitle: ReactNode;
 };
 
 const getDiffCell = (row: LineDiffRow, side: DiffSide) => {
@@ -83,10 +84,10 @@ export function SplitDiffFiles({
 type ImageDiffPreviewProps = {
   ariaLabel: string;
   baseImage?: ImageAsset | DraftImage;
-  baseTitle: string;
+  baseTitle: ReactNode;
   emptyLabel: string;
   targetImage?: ImageAsset | DraftImage;
-  targetTitle: string;
+  targetTitle: ReactNode;
 };
 
 function ImageDiffCell({

@@ -14,6 +14,8 @@ type WritePanelProps = {
   draftLabel: string;
   draftNotes: string;
   draftResultText: string;
+  isVersionEdit?: boolean;
+  isVersionView?: boolean;
   modelOptions: TagPopoverOption[];
   pasteTargetActive: boolean;
   previousBody: string;
@@ -38,6 +40,8 @@ export function WritePanel({
   draftLabel,
   draftNotes,
   draftResultText,
+  isVersionEdit = false,
+  isVersionView = false,
   modelOptions,
   pasteTargetActive,
   previousBody,
@@ -58,6 +62,13 @@ export function WritePanel({
   const imageUploadInputRef = useRef<HTMLInputElement>(null);
   const promptTextareaRef = useRef<HTMLTextAreaElement>(null);
   const resultTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const isPromptLocked = isVersionEdit || isVersionView;
+  const isFullyReadOnly = isVersionView;
+  const panelTitle = isVersionEdit
+    ? ui.editVersion
+    : isVersionView
+      ? ui.viewVersion
+      : ui.write;
 
   const selectTextarea = (textarea: HTMLTextAreaElement | null) => {
     textarea?.focus();
@@ -67,7 +78,7 @@ export function WritePanel({
   return (
     <section className="panel editor-panel">
       <div className="panel-heading">
-        <h3>{ui.write}</h3>
+        <h3>{panelTitle}</h3>
         <span>
           {ui.promptChars(
             draftBody.length.toLocaleString(),
@@ -77,9 +88,10 @@ export function WritePanel({
           )}
         </span>
       </div>
-      <div className="write-model-picker">
+      <div className={`write-model-picker ${isPromptLocked ? "locked" : ""}`}>
         <TagPopoverSelect
           addLabel={ui.addModel}
+          disabled={isPromptLocked}
           emptyLabel={ui.noModelOptions}
           label={ui.currentModels}
           options={modelOptions}
@@ -93,11 +105,12 @@ export function WritePanel({
         {ui.versionName}
         <input
           value={draftLabel}
+          readOnly={isFullyReadOnly}
           onChange={(event) => onDraftLabelChange(event.target.value)}
           placeholder={ui.versionNamePlaceholder}
         />
       </label>
-      <div className="editor-field">
+      <div className={`editor-field ${isPromptLocked ? "locked" : ""}`}>
         <div className="field-title-row">
           <span>{ui.prompt}</span>
           <div className="field-actions">
@@ -114,6 +127,7 @@ export function WritePanel({
             <button
               type="button"
               className="field-action-button"
+              disabled={isPromptLocked}
               onClick={() => onDraftBodyChange(previousBody)}
               aria-label={ui.resetPromptAria}
               title={ui.resetPromptAria}
@@ -126,13 +140,14 @@ export function WritePanel({
         <textarea
           ref={promptTextareaRef}
           value={draftBody}
+          readOnly={isPromptLocked}
           onChange={(event) => onDraftBodyChange(event.target.value)}
           placeholder={ui.promptPlaceholder}
           aria-label={ui.prompt}
         />
       </div>
       {selectedTopicKind === "text" ? (
-        <div className="editor-field result-text-field">
+        <div className={`editor-field result-text-field ${isFullyReadOnly ? "locked" : ""}`}>
           <div className="field-title-row">
             <span>{ui.resultText}</span>
             <div className="field-actions">
@@ -149,6 +164,7 @@ export function WritePanel({
               <button
                 type="button"
                 className="field-action-button"
+                disabled={isFullyReadOnly}
                 onClick={() => onDraftResultTextChange(previousResultText)}
                 aria-label={ui.resetResultTextAria}
                 title={ui.resetResultTextAria}
@@ -161,6 +177,7 @@ export function WritePanel({
           <textarea
             ref={resultTextareaRef}
             value={draftResultText}
+            readOnly={isFullyReadOnly}
             onChange={(event) => onDraftResultTextChange(event.target.value)}
             placeholder={ui.resultTextPlaceholder}
             aria-label={ui.resultText}
@@ -171,6 +188,7 @@ export function WritePanel({
         {ui.notes}
         <textarea
           value={draftNotes}
+          readOnly={isFullyReadOnly}
           onChange={(event) => onDraftNotesChange(event.target.value)}
           placeholder={ui.notesPlaceholder}
           rows={3}
@@ -189,16 +207,18 @@ export function WritePanel({
               type="file"
               accept="image/*"
               multiple
+              disabled={isFullyReadOnly}
               onChange={onImageUpload}
               tabIndex={-1}
             />
             <button
               type="button"
               className={`image-add-target ${pasteTargetActive ? "active" : ""}`}
+              disabled={isFullyReadOnly}
               onClick={() => imageUploadInputRef.current?.click()}
               onFocus={() => onPasteTargetActiveChange(true)}
               onBlur={() => onPasteTargetActiveChange(false)}
-              onPaste={onImagePaste}
+              onPaste={isFullyReadOnly ? undefined : onImagePaste}
             >
               <ImagePlus aria-hidden="true" size={18} />
               <span>
@@ -215,14 +235,16 @@ export function WritePanel({
                   <img src={image.dataUrl} alt={image.name} />
                   <figcaption>
                     <span>{image.name}</span>
-                    <button
-                      type="button"
-                      className="image-delete-button"
-                      onClick={() => onRemoveDraftImage(image.id)}
-                      aria-label={ui.deleteImageAria(image.name)}
-                    >
-                      <Trash2 aria-hidden="true" size={14} />
-                    </button>
+                    {isFullyReadOnly ? null : (
+                      <button
+                        type="button"
+                        className="image-delete-button"
+                        onClick={() => onRemoveDraftImage(image.id)}
+                        aria-label={ui.deleteImageAria(image.name)}
+                      >
+                        <Trash2 aria-hidden="true" size={14} />
+                      </button>
+                    )}
                   </figcaption>
                 </figure>
               ))}

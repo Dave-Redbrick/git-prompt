@@ -34,7 +34,7 @@ export const getInputRateParts = (model: {
   };
 };
 
-export const costEstimatorVersion = 1;
+export const costEstimatorVersion = 3;
 export type CostCurrencyLocale = "ko" | "en";
 
 export type TopicModelOption = TopicModelConfig & {
@@ -299,6 +299,22 @@ const estimateInputCost = (
   return pricedTokenCount > 0 ? (tokens / pricedTokenCount) * inputPriceUsd : 0;
 };
 
+const getBillableImageCount = (kind: PromptVersionKind, rawImageCount: number) =>
+  kind === "image" ? Math.max(1, rawImageCount) : 0;
+
+const sumCostItems = (modelCostItems: ModelCostItem[]) =>
+  modelCostItems.reduce((total, item) => total + item.costUsd, 0);
+
+const sumInputTokens = (modelCostItems: ModelCostItem[]) =>
+  modelCostItems
+    .filter((item) => item.type === "input")
+    .reduce((total, item) => total + (item.tokenCount ?? 0), 0);
+
+const sumEmbeddingTokens = (modelCostItems: ModelCostItem[]) =>
+  modelCostItems
+    .filter((item) => item.role === "embedding")
+    .reduce((total, item) => total + (item.tokenCount ?? 0), 0);
+
 const formatTinyDecimal = (value: number) => {
   if (value >= 0.01) {
     return value.toFixed(2);
@@ -408,8 +424,8 @@ const buildModelCostItems = ({
       return [
         {
           costPerImageUsd: model.costPerImageUsd ?? 0,
-          costUsd: billableImages * (model.costPerImageUsd ?? 0),
-          imageCount: billableImages,
+          costUsd: (model.costPerImageUsd ?? 0) * (billableImages > 0 ? 1 : 0),
+          imageCount: billableImages > 0 ? 1 : 0,
           modelId: model.id,
           provider: model.provider,
           role: model.role,
@@ -427,10 +443,50 @@ const buildModelCostItems = ({
         modelId: model.id,
         provider: model.provider,
         role: model.role,
+        runCount: 1,
         tokenCount: promptTokens,
+        tokensPerRun: promptTokens,
         type: "input",
       },
     ];
+  });
+};
+
+const repriceSnapshotModelCostItems = (
+  snapshot: VersionCostSnapshot,
+  kind: PromptVersionKind,
+): ModelCostItem[] => {
+  const billableImages = getBillableImageCount(kind, snapshot.imageCount);
+
+  return (snapshot.modelCostItems ?? []).map((item) => {
+    if (kind !== "image") {
+      return { ...item };
+    }
+
+    if (item.type === "image") {
+      const costPerImageUsd =
+        item.costPerImageUsd ??
+        (item.imageCount && item.imageCount > 0
+          ? item.costUsd / item.imageCount
+          : 0);
+
+      return {
+        ...item,
+        costPerImageUsd,
+        costUsd: billableImages > 0 ? costPerImageUsd : 0,
+        imageCount: billableImages > 0 ? 1 : 0,
+      };
+    }
+
+    const tokensPerRun = item.tokensPerRun ?? snapshot.promptTokens;
+
+    return {
+      ...item,
+      costUsd: estimateInputCost(tokensPerRun, item),
+      runCount: 1,
+      tokenCount: tokensPerRun,
+      tokensPerRun,
+    };
   });
 };
 
@@ -458,20 +514,18 @@ const estimateVersionBaseMetrics = (
 
   if (version.costSnapshot) {
     const snapshot = version.costSnapshot;
-    const modelCostItems = snapshot.modelCostItems ?? [];
+    const modelCostItems = repriceSnapshotModelCostItems(snapshot, kind);
     const { embeddingCostUsd, imageCostUsd, inputCostUsd } =
       summarizeModelCostItems(modelCostItems);
     const modelIds = version.modelIds ?? modelCostItems.map((item) => item.modelId);
 
     return {
       embeddingCostUsd,
-      embeddingTokens: modelCostItems.some((item) => item.role === "embedding")
-        ? snapshot.promptTokens
-        : 0,
+      embeddingTokens: sumEmbeddingTokens(modelCostItems),
       imageCostUsd,
       imageCount: snapshot.imageCount,
       inputCostUsd,
-      inputTokens: snapshot.promptTokens,
+      inputTokens: sumInputTokens(modelCostItems),
       kind,
       modelCostItems,
       modelIds,
@@ -480,7 +534,7 @@ const estimateVersionBaseMetrics = (
       promptChars: snapshot.promptChars,
       promptTokens: snapshot.promptTokens,
       resultChars: snapshot.resultChars,
-      totalCostUsd: snapshot.totalCostUsd,
+      totalCostUsd: sumCostItems(modelCostItems),
     };
   }
 
@@ -493,7 +547,7 @@ const estimateVersionBaseMetrics = (
   const resultChars = countTextChars(resultText);
   const rawImageCount =
     kind === "image" ? getImageCount(version, imagesByVersion) : 0;
-  const billableImages = kind === "image" ? Math.max(1, rawImageCount) : 0;
+  const billableImages = getBillableImageCount(kind, rawImageCount);
   const modelCostItems = buildModelCostItems({
     billableImages,
     kind,
@@ -505,13 +559,11 @@ const estimateVersionBaseMetrics = (
 
   return {
     embeddingCostUsd,
-    embeddingTokens: modelCostItems.some((item) => item.role === "embedding")
-      ? promptTokens
-      : 0,
+    embeddingTokens: sumEmbeddingTokens(modelCostItems),
     imageCostUsd,
     imageCount: billableImages,
     inputCostUsd,
-    inputTokens: promptTokens,
+    inputTokens: sumInputTokens(modelCostItems),
     kind,
     modelCostItems,
     modelIds: models.map((model) => getModelSelectionId(model)),
@@ -520,17 +572,30 @@ const estimateVersionBaseMetrics = (
     promptChars,
     promptTokens,
     resultChars,
-    totalCostUsd: inputCostUsd + imageCostUsd,
+    totalCostUsd: sumCostItems(modelCostItems),
   };
 };
 
+const getModelDiffKey = (modelId: string) => {
+  const normalizedModelId = normalizeLegacyModelSelectionId(modelId);
+  const separatorIndex = normalizedModelId.indexOf(":");
+
+  return separatorIndex >= 0
+    ? normalizedModelId.slice(separatorIndex + 1)
+    : normalizedModelId;
+};
+
 const getModelDiff = (currentModelIds: string[], previousModelIds: string[]) => {
-  const previousModelSet = new Set(previousModelIds);
-  const currentModelSet = new Set(currentModelIds);
+  const previousModelSet = new Set(previousModelIds.map(getModelDiffKey));
+  const currentModelSet = new Set(currentModelIds.map(getModelDiffKey));
 
   return {
-    modelAddedIds: currentModelIds.filter((modelId) => !previousModelSet.has(modelId)),
-    modelRemovedIds: previousModelIds.filter((modelId) => !currentModelSet.has(modelId)),
+    modelAddedIds: currentModelIds.filter(
+      (modelId) => !previousModelSet.has(getModelDiffKey(modelId)),
+    ),
+    modelRemovedIds: previousModelIds.filter(
+      (modelId) => !currentModelSet.has(getModelDiffKey(modelId)),
+    ),
   };
 };
 
@@ -587,6 +652,33 @@ export const createCostSnapshot = (
   resultChars: metrics.resultChars,
   totalCostUsd: metrics.totalCostUsd,
 });
+
+export const repriceCostSnapshotForResultCount = ({
+  kind,
+  rawImageCount,
+  resultText,
+  snapshot,
+}: {
+  kind: PromptVersionKind;
+  rawImageCount: number;
+  resultText: string;
+  snapshot: VersionCostSnapshot;
+}): VersionCostSnapshot => {
+  const imageCount = getBillableImageCount(kind, rawImageCount);
+  const nextSnapshot = {
+    ...snapshot,
+    estimatorVersion: costEstimatorVersion,
+    imageCount,
+    resultChars: kind === "text" ? countTextChars(resultText) : 0,
+  };
+  const modelCostItems = repriceSnapshotModelCostItems(nextSnapshot, kind);
+
+  return {
+    ...nextSnapshot,
+    modelCostItems,
+    totalCostUsd: sumCostItems(modelCostItems),
+  };
+};
 
 export const estimateDraftCostMetrics = ({
   body,

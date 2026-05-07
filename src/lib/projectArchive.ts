@@ -1,4 +1,11 @@
-import type { ImageAsset, Project, PromptVersion, Theme, Topic } from "../types";
+import type {
+  ImageAsset,
+  Project,
+  PromptVersion,
+  Theme,
+  Topic,
+  TopicModelConfig,
+} from "../types";
 import { createId, nowIso, putItem } from "./db";
 
 export type ProjectArchiveStore = {
@@ -7,6 +14,7 @@ export type ProjectArchiveStore = {
   topics: Topic[];
   versions: PromptVersion[];
   images: ImageAsset[];
+  customModels: TopicModelConfig[];
 };
 
 type ArchiveImage = Omit<ImageAsset, "dataUrl"> & {
@@ -23,6 +31,7 @@ type ProjectArchiveManifest = {
   topics: Topic[];
   versions: PromptVersion[];
   images: ArchiveImage[];
+  customModels: TopicModelConfig[];
 };
 
 export type ImportedProjectArchive = {
@@ -31,6 +40,7 @@ export type ImportedProjectArchive = {
   topics: Topic[];
   versions: PromptVersion[];
   images: ImageAsset[];
+  customModels: TopicModelConfig[];
 };
 
 type ZipEntryInput = {
@@ -253,7 +263,8 @@ function assertArchiveManifest(
     !value ||
     typeof value !== "object" ||
     (value as ProjectArchiveManifest).schema !== "git-prompt.project-archive" ||
-    (value as ProjectArchiveManifest).version !== 1
+    (value as ProjectArchiveManifest).version !== 1 ||
+    !Array.isArray((value as ProjectArchiveManifest).customModels)
   ) {
     throw new Error("Invalid Git Prompt project archive.");
   }
@@ -302,6 +313,7 @@ const collectProjectArchive = (
     topics,
     versions,
     images,
+    customModels: store.customModels ?? [],
   };
 };
 
@@ -404,6 +416,7 @@ export const importProjectArchiveZip = async (
       createdAt: image.createdAt,
     };
   });
+  const customModels = manifest.customModels;
 
   await putItem("projects", project);
   await Promise.all(themes.map((theme) => putItem("themes", theme)));
@@ -417,5 +430,6 @@ export const importProjectArchiveZip = async (
     topics,
     versions,
     images,
+    customModels,
   };
 };
