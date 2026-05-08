@@ -23,6 +23,10 @@ type ArchivePromptVersion = Omit<PromptVersion, "resultText" | "resultTexts">;
 
 type ArchiveResultKind = "text" | ResultMediaKind;
 
+type ArchiveImage = Omit<ImageAsset, "dataUrl"> & {
+  path: string;
+};
+
 type ArchiveResultFile = {
   id: string;
   topicId: string;
@@ -35,7 +39,19 @@ type ArchiveResultFile = {
   index?: number;
 };
 
-type ProjectArchiveManifest = {
+type ProjectArchiveManifestV1 = {
+  app: "Git Prompt";
+  exportedAt: string;
+  schema: "git-prompt.project-archive";
+  version: 1;
+  project: Project;
+  themes: Theme[];
+  topics: Topic[];
+  versions: PromptVersion[];
+  images: ArchiveImage[];
+};
+
+type ProjectArchiveManifestV2 = {
   app: "Git Prompt";
   exportedAt: string;
   schema: "git-prompt.project-archive";
@@ -47,6 +63,8 @@ type ProjectArchiveManifest = {
   resultFiles: ArchiveResultFile[];
   customModels: TopicModelConfig[];
 };
+
+type ProjectArchiveManifest = ProjectArchiveManifestV1 | ProjectArchiveManifestV2;
 
 export type ImportedProjectArchive = {
   project: Project;
@@ -279,22 +297,38 @@ const readZipEntries = async (file: Blob): Promise<ZipEntryOutput[]> => {
 function assertArchiveManifest(
   value: unknown,
 ): asserts value is ProjectArchiveManifest {
+  const manifest = value as Partial<ProjectArchiveManifest>;
+
   if (
     !value ||
     typeof value !== "object" ||
-    (value as ProjectArchiveManifest).schema !== "git-prompt.project-archive" ||
-    (value as ProjectArchiveManifest).version !== 2 ||
-    !Array.isArray((value as ProjectArchiveManifest).resultFiles) ||
-    !Array.isArray((value as ProjectArchiveManifest).customModels)
+    manifest.schema !== "git-prompt.project-archive" ||
+    !Array.isArray(manifest.themes) ||
+    !Array.isArray(manifest.topics) ||
+    !Array.isArray(manifest.versions)
   ) {
     throw new Error("Invalid Git Prompt project archive.");
   }
+
+  if (manifest.version === 1 && Array.isArray(manifest.images)) {
+    return;
+  }
+
+  if (
+    manifest.version === 2 &&
+    Array.isArray(manifest.resultFiles) &&
+    Array.isArray(manifest.customModels)
+  ) {
+    return;
+  }
+
+  throw new Error("Invalid Git Prompt project archive.");
 }
 
 const collectProjectArchive = (
   projectId: string,
   store: ProjectArchiveStore,
-): ProjectArchiveManifest => {
+): ProjectArchiveManifestV2 => {
   const project = store.projects.find((item) => item.id === projectId);
   if (!project) {
     throw new Error("Project not found.");
@@ -452,9 +486,12 @@ export const importProjectArchiveZip = async (
     themeId: topic.themeId ? themeIdMap.get(topic.themeId) : undefined,
   }));
   const textResultsByVersion = new Map<string, string[]>();
-  const textResultFiles = manifest.resultFiles
-    .filter((resultFile) => resultFile.kind === "text")
-    .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+  const textResultFiles =
+    manifest.version === 2
+      ? manifest.resultFiles
+          .filter((resultFile) => resultFile.kind === "text")
+          .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+      : [];
 
   for (const resultFile of textResultFiles) {
     const textData = entryMap.get(resultFile.path);
@@ -468,9 +505,12 @@ export const importProjectArchiveZip = async (
   }
 
   const versions: PromptVersion[] = manifest.versions.map((version) => {
-    const resultTexts = (textResultsByVersion.get(version.id) ?? []).filter(
-      (resultText) => resultText.trim().length > 0,
-    );
+    const resultTexts =
+      manifest.version === 2
+        ? (textResultsByVersion.get(version.id) ?? []).filter(
+            (resultText) => resultText.trim().length > 0,
+          )
+        : getVersionResultTexts(version);
     const resultText = joinResultTexts(resultTexts);
 
     const versionKind = version.kind ?? "text";
@@ -483,29 +523,51 @@ export const importProjectArchiveZip = async (
       resultTexts: versionKind === "text" ? resultTexts : [],
     };
   });
-  const images: ImageAsset[] = manifest.resultFiles
-    .filter(
-      (resultFile): resultFile is ArchiveResultFile & { kind: ResultMediaKind } =>
-        resultFile.kind !== "text",
-    )
-    .map((resultFile) => {
-      const resultData = entryMap.get(resultFile.path);
-      if (!resultData) {
-        throw new Error(`Missing result file: ${resultFile.path}`);
-      }
+  const images: ImageAsset[] =
+    manifest.version === 2
+      ? manifest.resultFiles
+          .filter(
+            (
+              resultFile,
+            ): resultFile is ArchiveResultFile & { kind: ResultMediaKind } =>
+              resultFile.kind !== "text",
+          )
+          .map((resultFile) => {
+            const resultData = entryMap.get(resultFile.path);
+            if (!resultData) {
+              throw new Error(`Missing result file: ${resultFile.path}`);
+            }
 
-      return {
-        id: createId(),
-        topicId: topicIdMap.get(resultFile.topicId) ?? resultFile.topicId,
-        versionId: versionIdMap.get(resultFile.versionId) ?? resultFile.versionId,
-        kind: resultFile.kind,
-        name: resultFile.name,
-        type: resultFile.type,
-        dataUrl: bytesToDataUrl(resultData, resultFile.type),
-        createdAt: resultFile.createdAt,
-      };
-    });
-  const customModels = manifest.customModels;
+            return {
+              id: createId(),
+              topicId: topicIdMap.get(resultFile.topicId) ?? resultFile.topicId,
+              versionId:
+                versionIdMap.get(resultFile.versionId) ?? resultFile.versionId,
+              kind: resultFile.kind,
+              name: resultFile.name,
+              type: resultFile.type,
+              dataUrl: bytesToDataUrl(resultData, resultFile.type),
+              createdAt: resultFile.createdAt,
+            };
+          })
+      : manifest.images.map((image) => {
+          const imageData = entryMap.get(image.path);
+          if (!imageData) {
+            throw new Error(`Missing image file: ${image.path}`);
+          }
+
+          return {
+            id: createId(),
+            topicId: topicIdMap.get(image.topicId) ?? image.topicId,
+            versionId: versionIdMap.get(image.versionId) ?? image.versionId,
+            kind: image.kind,
+            name: image.name,
+            type: image.type,
+            dataUrl: bytesToDataUrl(imageData, image.type),
+            createdAt: image.createdAt,
+          };
+        });
+  const customModels = manifest.version === 2 ? manifest.customModels : [];
 
   await putItem("projects", project);
   await Promise.all(themes.map((theme) => putItem("themes", theme)));

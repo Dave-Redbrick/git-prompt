@@ -264,12 +264,18 @@ export const messages = {
     voice: "보이스",
     video: "비디오",
     textModels: "텍스트 모델",
+    themeCostUsage: (theme: string) => `${theme} 총 비용`,
     themeDeleted: "테마를 삭제했습니다.",
     themeDeleteMessage: (name: string) =>
       `"${name}" 테마와 포함된 주제, 버전, 이미지를 모두 삭제할까요?`,
     themeDeleteTitle: "테마 삭제",
     themeNamePlaceholder: "테마 이름",
     themeSaved: "테마 폴더를 저장했습니다.",
+    themeTopicUsageSummary: (tests: string, results: string) =>
+      `테스트 ${tests}회 · 결과물 ${results}개`,
+    themeUsageNoData: "표시할 주제가 없습니다.",
+    themeUsageSavedOnly: "저장된 주제/버전 기준 누적 예상",
+    themeUsageTopics: (count: string) => `주제 ${count}개`,
     themesSection: "테마",
     topicDeleted: "주제를 삭제했습니다.",
     topicDeleteMessage: (title: string) =>
@@ -549,12 +555,21 @@ export const messages = {
     voice: "Voice",
     video: "Video",
     textModels: "Text models",
+    themeCostUsage: (theme: string) => `${theme} total cost`,
     themeDeleted: "Theme deleted.",
     themeDeleteMessage: (name: string) =>
       `Delete "${name}" and all contained topics, versions, and images?`,
     themeDeleteTitle: "Delete theme",
     themeNamePlaceholder: "Theme name",
     themeSaved: "Theme folder saved.",
+    themeTopicUsageSummary: (tests: string, results: string) =>
+      `${tests} test${tests.replace(/^[+-]/, "") === "1" ? "" : "s"} · ${results} result${
+        results.replace(/^[+-]/, "") === "1" ? "" : "s"
+      }`,
+    themeUsageNoData: "No topics to show.",
+    themeUsageSavedOnly: "Cumulative estimate from saved topics and versions",
+    themeUsageTopics: (count: string) =>
+      `${count} topic${count.replace(/^[+-]/, "") === "1" ? "" : "s"}`,
     themesSection: "Themes",
     topicDeleted: "Topic deleted.",
     topicDeleteMessage: (title: string) =>

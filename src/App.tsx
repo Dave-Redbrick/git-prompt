@@ -36,7 +36,10 @@ import {
   ConfirmModal,
   type ConfirmDialogState,
 } from "./components/ConfirmModal";
-import { CostTrendPanel } from "./components/CostTrendPanel";
+import {
+  CostTrendPanel,
+  type ThemeCostSummary,
+} from "./components/CostTrendPanel";
 import { DiffPanel } from "./components/DiffPanel";
 import { HistoryGraph } from "./components/HistoryGraph";
 import { Toast, type ToastState, type ToastVariant } from "./components/Toast";
@@ -1115,6 +1118,93 @@ export function App() {
       selectedTopicModelIds,
     ],
   );
+
+  const themeCostSummary = useMemo<ThemeCostSummary | null>(() => {
+    if (!selectedTheme) {
+      return null;
+    }
+
+    const topics = store.topics
+      .filter(
+        (topic) =>
+          topic.projectId === selectedProjectId &&
+          topic.themeId === selectedTheme.id,
+      )
+      .map((topic) => {
+        const versions = store.versions.filter(
+          (version) => version.topicId === topic.id,
+        );
+        const latest = versions[versions.length - 1] ?? null;
+        const kind = getTopicKind(topic, latest);
+        const modelIds = resolveTopicModelIds(
+          kind,
+          topic.modelIds,
+          customModels,
+        );
+        const topicMetricsByVersion = buildVersionCostMetrics(
+          versions,
+          imagesByVersion,
+          kind,
+          modelIds,
+          customModels,
+        );
+        const summary = versions.reduce(
+          (acc, version) => {
+            const metrics = topicMetricsByVersion[version.id];
+            if (!metrics) {
+              return acc;
+            }
+
+            const billableRuns = Math.max(1, metrics.resultCount);
+
+            return {
+              inputTokens: acc.inputTokens + metrics.inputTokens * billableRuns,
+              resultCount: acc.resultCount + metrics.resultCount,
+              runCount: acc.runCount + 1,
+              totalCostUsd:
+                acc.totalCostUsd + metrics.totalCostUsd * billableRuns,
+            };
+          },
+          {
+            inputTokens: 0,
+            resultCount: 0,
+            runCount: 0,
+            totalCostUsd: 0,
+          },
+        );
+
+        return {
+          ...summary,
+          id: topic.id,
+          title: topic.title,
+        };
+      })
+      .sort(
+        (a, b) =>
+          b.totalCostUsd - a.totalCostUsd ||
+          b.runCount - a.runCount ||
+          a.title.localeCompare(b.title),
+      );
+
+    return {
+      inputTokens: topics.reduce((total, topic) => total + topic.inputTokens, 0),
+      resultCount: topics.reduce((total, topic) => total + topic.resultCount, 0),
+      runCount: topics.reduce((total, topic) => total + topic.runCount, 0),
+      themeName: selectedTheme.name,
+      topics,
+      totalCostUsd: topics.reduce(
+        (total, topic) => total + topic.totalCostUsd,
+        0,
+      ),
+    };
+  }, [
+    customModels,
+    imagesByVersion,
+    selectedProjectId,
+    selectedTheme,
+    store.topics,
+    store.versions,
+  ]);
 
   const themeCountByProject = useMemo(() => {
     return store.themes.reduce<Record<string, number>>((acc, theme) => {
@@ -3996,6 +4086,7 @@ export function App() {
                   includeDraftInTopicUsage={canSaveDraft && !isVersionView}
                   locale={locale}
                   metricsByVersion={metricsByVersion}
+                  themeCostSummary={themeCostSummary}
                   topicVersions={topicVersions}
                   ui={ui}
                 />

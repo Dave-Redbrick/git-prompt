@@ -1251,7 +1251,8 @@ textarea::placeholder {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
-.topic-usage-card {
+.topic-usage-card,
+.theme-usage-card {
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -1311,6 +1312,62 @@ textarea::placeholder {
 }
 
 .topic-improvement-metrics {
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.theme-topic-cost-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.theme-topic-cost-row {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.theme-topic-cost-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.theme-topic-cost-head div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.theme-topic-cost-head strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.theme-topic-cost-head span,
+.theme-usage-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.theme-topic-cost-head b {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
+.theme-usage-empty {
   padding-top: 10px;
   border-top: 1px solid var(--border);
 }

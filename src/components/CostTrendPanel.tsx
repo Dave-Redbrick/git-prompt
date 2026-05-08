@@ -142,6 +142,7 @@ type CostTrendPanelProps = {
   includeDraftInTopicUsage: boolean;
   locale: Locale;
   metricsByVersion: Record<string, VersionCostMetrics>;
+  themeCostSummary: ThemeCostSummary | null;
   topicVersions: PromptVersion[];
   ui: UiMessages;
 };
@@ -153,6 +154,24 @@ type TopicUsageSummary = {
   resultChars: number;
   resultCount: number;
   runCount: number;
+  totalCostUsd: number;
+};
+
+export type ThemeTopicCostSummary = {
+  id: string;
+  inputTokens: number;
+  resultCount: number;
+  runCount: number;
+  title: string;
+  totalCostUsd: number;
+};
+
+export type ThemeCostSummary = {
+  inputTokens: number;
+  resultCount: number;
+  runCount: number;
+  themeName: string;
+  topics: ThemeTopicCostSummary[];
   totalCostUsd: number;
 };
 
@@ -211,6 +230,7 @@ export function CostTrendPanel({
   includeDraftInTopicUsage,
   locale,
   metricsByVersion,
+  themeCostSummary,
   topicVersions,
   ui,
 }: CostTrendPanelProps) {
@@ -260,6 +280,10 @@ export function CostTrendPanel({
   }));
   const costChartDomain = getCostChartDomain(
     chartData.map((item) => item.cost),
+  );
+  const maxThemeTopicCost = Math.max(
+    0.000001,
+    ...(themeCostSummary?.topics.map((topic) => topic.totalCostUsd) ?? []),
   );
 
   return (
@@ -449,6 +473,73 @@ export function CostTrendPanel({
             </div>
           ) : null}
         </article>
+
+        {themeCostSummary ? (
+          <article className="theme-usage-card">
+            <div className="topic-usage-main">
+              <div>
+                <strong>{ui.themeCostUsage(themeCostSummary.themeName)}</strong>
+                <span>{ui.themeUsageSavedOnly}</span>
+              </div>
+              <b>{formatCost(themeCostSummary.totalCostUsd)}</b>
+            </div>
+            <div className="topic-usage-metrics">
+              <span>
+                {ui.themeUsageTopics(
+                  themeCostSummary.topics.length.toLocaleString(),
+                )}
+              </span>
+              <span>
+                {ui.topicUsageTests(themeCostSummary.runCount.toLocaleString())}
+              </span>
+              <span>
+                {ui.topicUsageResults(
+                  themeCostSummary.resultCount.toLocaleString(),
+                )}
+              </span>
+              <span>
+                {ui.topicUsageInputTokens(
+                  themeCostSummary.inputTokens.toLocaleString(),
+                )}
+              </span>
+            </div>
+            {themeCostSummary.topics.length > 0 ? (
+              <div className="theme-topic-cost-list">
+                {themeCostSummary.topics.map((topic) => {
+                  const barWidth =
+                    topic.totalCostUsd > 0
+                      ? `${Math.max(4, (topic.totalCostUsd / maxThemeTopicCost) * 100)}%`
+                      : "0%";
+
+                  return (
+                    <div className="theme-topic-cost-row" key={topic.id}>
+                      <div className="theme-topic-cost-head">
+                        <div>
+                          <strong>{topic.title}</strong>
+                          <span>
+                            {ui.themeTopicUsageSummary(
+                              topic.runCount.toLocaleString(),
+                              topic.resultCount.toLocaleString(),
+                            )}
+                          </span>
+                        </div>
+                        <b>{formatCost(topic.totalCostUsd)}</b>
+                      </div>
+                      <div className="trend-bar-track">
+                        <span
+                          className="trend-bar"
+                          style={{ width: barWidth }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="theme-usage-empty">{ui.themeUsageNoData}</div>
+            )}
+          </article>
+        ) : null}
       </section>
     </section>
   );
