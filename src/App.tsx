@@ -1500,6 +1500,23 @@ export function App() {
       : null;
   const canCompareStoredPrevious = Boolean(previousStoredVersion);
   const canCompareStoredNext = Boolean(nextStoredVersion);
+  const previousNavigableVersion = selectedStoredVersion
+    ? previousStoredVersion
+    : latestVersion;
+  const previousNavigableVersionId = previousNavigableVersion?.id ?? null;
+  const nextNavigableVersionId = selectedStoredVersion
+    ? (nextStoredVersion?.id ?? "draft")
+    : null;
+  const navigateDiffVersion = (versionId: string | null) => {
+    if (!versionId) {
+      return;
+    }
+
+    setEditingVersionId(null);
+    setActiveVersionId(versionId);
+    setCompareDirection("previous");
+    setMainView("diff");
+  };
   const effectiveCompareDirection: CompareDirection =
     selectedStoredVersion && compareDirection === "next"
       ? canCompareStoredNext
@@ -4053,6 +4070,8 @@ export function App() {
                   addedCount={addedCount}
                   canCompareNext={canCompareStoredNext}
                   canComparePrevious={canCompareStoredPrevious}
+                  canNavigateNextVersion={Boolean(nextNavigableVersionId)}
+                  canNavigatePreviousVersion={Boolean(previousNavigableVersionId)}
                   compareBase={compareBase}
                   compareBaseImages={compareBaseImages}
                   compareDirection={effectiveCompareDirection}
@@ -4075,6 +4094,12 @@ export function App() {
                   userPromptDiffRows={userPromptDiffRows}
                   onBaseResultDiffIndexChange={setBaseResultDiffIndex}
                   onCompareDirectionChange={setCompareDirection}
+                  onNavigateNextVersion={() =>
+                    navigateDiffVersion(nextNavigableVersionId)
+                  }
+                  onNavigatePreviousVersion={() =>
+                    navigateDiffVersion(previousNavigableVersionId)
+                  }
                   onTargetResultDiffIndexChange={setTargetResultDiffIndex}
                   onToggleGoodResult={(version) => void toggleGoodResult(version)}
                 />

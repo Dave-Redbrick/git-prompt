@@ -2202,12 +2202,80 @@ textarea::placeholder {
   overflow: hidden;
 }
 
-.prompt-diff-block:first-child {
+.prompt-diff-block:first-child,
+.prompt-diff-block.primary-prompt-diff-block {
   flex: 3 1 0;
 }
 
 .prompt-diff-block + .prompt-diff-block {
   border-top: 1px solid var(--border);
+}
+
+.prompt-diff-tabs {
+  display: flex;
+  min-width: 0;
+  min-height: 100%;
+  flex: 1 1 auto;
+  align-self: stretch;
+  align-items: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0;
+  background: transparent;
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.prompt-diff-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.prompt-diff-tabs button {
+  display: inline-flex;
+  min-width: 0;
+  min-height: 100%;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 0 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.prompt-diff-tabs button:hover,
+.prompt-diff-tabs button:focus {
+  color: var(--text);
+  background: var(--hover-bg);
+  outline: none;
+}
+
+.prompt-diff-tabs button.active {
+  border-bottom-color: var(--text);
+  background: transparent;
+  color: var(--text);
+}
+
+.prompt-diff-tabs button > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompt-diff-tabs button > b {
+  min-width: 16px;
+  border-radius: 999px;
+  padding: 1px 5px;
+  background: var(--input-bg);
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  text-align: center;
 }
 
 .prompt-diff-label,
@@ -2224,6 +2292,16 @@ textarea::placeholder {
   color: var(--muted);
   font-size: 12px;
   font-weight: 900;
+}
+
+.prompt-diff-label.with-tabs {
+  justify-content: flex-start;
+  padding-right: 4px;
+}
+
+.prompt-diff-label-text {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .prompt-diff-block .split-diff {
@@ -2382,6 +2460,38 @@ textarea::placeholder {
   margin-left: auto;
 }
 
+.diff-version-navigation {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 8px;
+}
+
+.diff-version-navigation button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.diff-version-navigation button:hover,
+.diff-version-navigation button:focus {
+  color: var(--text);
+  background: var(--hover-bg);
+  outline: none;
+}
+
+.diff-version-navigation button:disabled {
+  color: var(--subtle);
+  background: transparent;
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .diff-summary {
   display: inline-flex;
   align-items: center;
@@ -2403,12 +2513,48 @@ textarea::placeholder {
 
 .split-diff {
   display: grid;
+  position: relative;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
   flex: 1 1 auto;
   overflow: hidden;
   border-bottom: 1px solid var(--border);
+}
+
+.diff-scroll-preview {
+  position: absolute;
+  top: 40px;
+  right: 4px;
+  bottom: 6px;
+  z-index: 3;
+  width: 6px;
+  pointer-events: none;
+}
+
+.split-diff.without-file-headers .diff-scroll-preview {
+  top: 6px;
+}
+
+.diff-scroll-preview-marker {
+  position: absolute;
+  right: 0;
+  left: 0;
+  min-height: 3px;
+  border-radius: 999px;
+  opacity: 0.86;
+}
+
+.diff-scroll-preview-marker.added {
+  background: #1f8f4d;
+}
+
+.diff-scroll-preview-marker.removed {
+  background: #d14b4b;
+}
+
+.diff-scroll-preview-marker.changed {
+  background: linear-gradient(90deg, #d14b4b 0 50%, #1f8f4d 50% 100%);
 }
 
 .split-diff.without-file-headers {

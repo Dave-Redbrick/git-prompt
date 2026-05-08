@@ -1,4 +1,5 @@
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { ChevronLeft, ChevronRight, Diff } from "lucide-react";
 import type { UiMessages } from "../i18n";
 import type { LineDiffRow } from "../lib/diff";
@@ -17,10 +18,15 @@ type PromptDiffBlock = {
   rows: LineDiffRow[];
 };
 
+const getChangedRowCount = (rows: LineDiffRow[]) =>
+  rows.filter((row) => row.type !== "same").length;
+
 type DiffPanelProps = {
   addedCount: number;
   canCompareNext: boolean;
   canComparePrevious: boolean;
+  canNavigateNextVersion: boolean;
+  canNavigatePreviousVersion: boolean;
   baseResultDiffCount: number;
   baseResultDiffIndex: number;
   compareBase: PromptVersion | null;
@@ -40,6 +46,8 @@ type DiffPanelProps = {
   userPromptDiffRows: LineDiffRow[];
   onBaseResultDiffIndexChange: (index: number) => void;
   onCompareDirectionChange: (direction: "previous" | "next") => void;
+  onNavigateNextVersion: () => void;
+  onNavigatePreviousVersion: () => void;
   onTargetResultDiffIndexChange: (index: number) => void;
   onToggleGoodResult: (version: PromptVersion) => void;
 };
@@ -50,6 +58,8 @@ export function DiffPanel({
   baseResultDiffIndex,
   canCompareNext,
   canComparePrevious,
+  canNavigateNextVersion,
+  canNavigatePreviousVersion,
   compareBase,
   compareBaseImages,
   compareDirection,
@@ -67,11 +77,30 @@ export function DiffPanel({
   userPromptDiffRows,
   onBaseResultDiffIndexChange,
   onCompareDirectionChange,
+  onNavigateNextVersion,
+  onNavigatePreviousVersion,
   onTargetResultDiffIndexChange,
   onToggleGoodResult,
 }: DiffPanelProps) {
   const baseResultSlideDirectionRef = useRef<"next" | "previous">("next");
   const targetResultSlideDirectionRef = useRef<"next" | "previous">("next");
+  const [activeSystemPromptKey, setActiveSystemPromptKey] = useState("");
+
+  useEffect(() => {
+    setActiveSystemPromptKey((currentKey) => {
+      if (systemPromptDiffBlocks.some((block) => block.key === currentKey)) {
+        return currentKey;
+      }
+
+      return (
+        systemPromptDiffBlocks.find((block) => getChangedRowCount(block.rows) > 0)
+          ?.key ??
+        systemPromptDiffBlocks[0]?.key ??
+        ""
+      );
+    });
+  }, [systemPromptDiffBlocks]);
+
   const renderVersionTitle = (label: string, version: PromptVersion | null) => (
     <span className="diff-version-title">
       {version ? (
@@ -194,6 +223,9 @@ export function DiffPanel({
   const showResultControlsHeader = Boolean(
     baseResultControls || targetResultControls,
   );
+  const showVersionNavigationControls = Boolean(
+    canNavigatePreviousVersion || canNavigateNextVersion,
+  );
   const resultLabel = (
     <div className="result-diff-label">
       <span>{ui.result}</span>
@@ -203,10 +235,16 @@ export function DiffPanel({
     label: string,
     rows: LineDiffRow[],
     key?: string,
+    isPrimary = false,
+    tabs?: ReactNode,
   ) => (
-    <div className="prompt-diff-block" key={key}>
-      <div className="prompt-diff-label">
-        <span>{label}</span>
+    <div
+      className={`prompt-diff-block ${isPrimary ? "primary-prompt-diff-block" : ""}`.trim()}
+      key={key}
+    >
+      <div className={`prompt-diff-label ${tabs ? "with-tabs" : ""}`.trim()}>
+        <span className="prompt-diff-label-text">{label}</span>
+        {tabs}
       </div>
       <SplitDiffFiles
         ariaLabel={ui.promptDiffAria}
@@ -219,6 +257,30 @@ export function DiffPanel({
       />
     </div>
   );
+  const activeSystemPromptBlock =
+    systemPromptDiffBlocks.find((block) => block.key === activeSystemPromptKey) ??
+    systemPromptDiffBlocks[0] ??
+    null;
+  const systemPromptTabs =
+    systemPromptDiffBlocks.length > 1 ? (
+      <div className="prompt-diff-tabs" aria-label={ui.systemPrompt}>
+        {systemPromptDiffBlocks.map((block) => {
+          const changedRowCount = getChangedRowCount(block.rows);
+
+          return (
+            <button
+              type="button"
+              className={block.key === activeSystemPromptBlock?.key ? "active" : ""}
+              key={block.key}
+              onClick={() => setActiveSystemPromptKey(block.key)}
+            >
+              <span>{block.label}</span>
+              {changedRowCount > 0 ? <b>{changedRowCount}</b> : null}
+            </button>
+          );
+        })}
+      </div>
+    ) : null;
 
   return (
     <section className="panel diff-panel">
@@ -248,6 +310,31 @@ export function DiffPanel({
           </div>
         ) : null}
         <div className="diff-title-actions">
+          {showVersionNavigationControls ? (
+            <div
+              className="diff-version-navigation"
+              aria-label={ui.versionNavigationAria}
+            >
+              <button
+                type="button"
+                disabled={!canNavigatePreviousVersion}
+                onClick={onNavigatePreviousVersion}
+                aria-label={ui.previousVersionAria}
+                title={ui.previousVersionAria}
+              >
+                <ChevronLeft aria-hidden="true" size={14} />
+              </button>
+              <button
+                type="button"
+                disabled={!canNavigateNextVersion}
+                onClick={onNavigateNextVersion}
+                aria-label={ui.nextVersionAria}
+                title={ui.nextVersionAria}
+              >
+                <ChevronRight aria-hidden="true" size={14} />
+              </button>
+            </div>
+          ) : null}
           <div className="diff-summary">
             <span className="added">+{addedCount}</span>
             <span className="removed">-{removedCount}</span>
@@ -264,13 +351,15 @@ export function DiffPanel({
           <div className="diff-version-header-cell">{targetTitle}</div>
         </div>
         <div className="prompt-diff-section">
-          {systemPromptDiffBlocks.map((block) =>
-            renderPromptDiffBlock(
-              `${ui.systemPrompt} · ${block.label}`,
-              block.rows,
-              block.key,
-            ),
-          )}
+          {activeSystemPromptBlock
+            ? renderPromptDiffBlock(
+                ui.systemPrompt,
+                activeSystemPromptBlock.rows,
+                "system-prompt-diff",
+                true,
+                systemPromptTabs,
+              )
+            : null}
           {renderPromptDiffBlock(ui.userPrompt, userPromptDiffRows)}
         </div>
         {compareTargetKind === "text" ? (

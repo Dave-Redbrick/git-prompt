@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { LineDiffRow } from "../lib/diff";
 import { pauseOtherAudioInGroup } from "../lib/audioPlayback";
@@ -15,6 +15,85 @@ type SplitDiffFilesProps = {
   rows: LineDiffRow[];
   showHeaders?: boolean;
   targetTitle: ReactNode;
+};
+
+type DiffOverviewMarkerType = Exclude<LineDiffRow["type"], "same">;
+
+type DiffOverviewMarker = {
+  endIndex: number;
+  id: string;
+  startIndex: number;
+  type: DiffOverviewMarkerType;
+};
+
+type DiffOverviewMarkerLayout = Record<string, { top: number; height: number }>;
+
+const MIN_OVERVIEW_MARKER_HEIGHT = 3;
+const FALLBACK_DIFF_ROW_HEIGHT = 24;
+
+const getOverviewMarkerType = (
+  types: DiffOverviewMarkerType[],
+): DiffOverviewMarkerType => {
+  const firstType = types[0] ?? "changed";
+
+  return types.every((type) => type === firstType) ? firstType : "changed";
+};
+
+const getOverviewMarkers = (rows: LineDiffRow[]) => {
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const markers: DiffOverviewMarker[] = [];
+  let index = 0;
+
+  while (index < rows.length) {
+    if (rows[index].type === "same") {
+      index += 1;
+      continue;
+    }
+
+    const startIndex = index;
+    const startRow = rows[index];
+    let endRow = startRow;
+    const blockTypes: DiffOverviewMarkerType[] = [];
+
+    while (index < rows.length && rows[index].type !== "same") {
+      endRow = rows[index];
+      blockTypes.push(rows[index].type as DiffOverviewMarkerType);
+      index += 1;
+    }
+
+    markers.push({
+      endIndex: index - 1,
+      id: `${startRow.id}:${endRow.id}`,
+      startIndex,
+      type: getOverviewMarkerType(blockTypes),
+    });
+  }
+
+  return markers;
+};
+
+const getFallbackOverviewMarkerLayout = (marker: DiffOverviewMarker) => ({
+  height: Math.max(
+    (marker.endIndex - marker.startIndex + 1) * FALLBACK_DIFF_ROW_HEIGHT,
+    MIN_OVERVIEW_MARKER_HEIGHT,
+  ),
+  top: marker.startIndex * FALLBACK_DIFF_ROW_HEIGHT,
+});
+
+const getOverviewMarkerStyle = (
+  marker: DiffOverviewMarker,
+  layout: DiffOverviewMarkerLayout,
+) => {
+  const markerLayout =
+    layout[marker.id] ?? getFallbackOverviewMarkerLayout(marker);
+
+  return {
+    height: `${markerLayout.height}px`,
+    top: `${markerLayout.top}px`,
+  };
 };
 
 const getDiffCell = (row: LineDiffRow, side: DiffSide) => {
@@ -61,6 +140,112 @@ export function SplitDiffFiles({
   showHeaders = true,
   targetTitle,
 }: SplitDiffFilesProps) {
+  const codeLinesRef = useRef<HTMLDivElement | null>(null);
+  const overviewRef = useRef<HTMLDivElement | null>(null);
+  const overviewMarkers = useMemo(() => getOverviewMarkers(rows), [rows]);
+  const [overviewMarkerLayout, setOverviewMarkerLayout] =
+    useState<DiffOverviewMarkerLayout>({});
+
+  const updateOverviewMarkerLayout = useCallback(() => {
+    const codeLinesElement = codeLinesRef.current;
+    const overviewElement = overviewRef.current;
+
+    if (
+      !codeLinesElement ||
+      !overviewElement ||
+      overviewMarkers.length === 0
+    ) {
+      setOverviewMarkerLayout({});
+      return;
+    }
+
+    const rowElements = Array.from(
+      codeLinesElement.querySelectorAll<HTMLElement>("[data-diff-row-index]"),
+    );
+    const codeLinesRect = codeLinesElement.getBoundingClientRect();
+    const rowBounds = rowElements.map((rowElement) => {
+      const rowRect = rowElement.getBoundingClientRect();
+      const top = rowRect.top - codeLinesRect.top + codeLinesElement.scrollTop;
+
+      return {
+        bottom: top + rowRect.height,
+        top,
+      };
+    });
+    const renderedContentBottom = rowBounds.reduce(
+      (bottom, bounds) => Math.max(bottom, bounds.bottom),
+      0,
+    );
+    const contentHeight = Math.max(
+      renderedContentBottom,
+      codeLinesElement.scrollHeight,
+      codeLinesElement.clientHeight,
+      1,
+    );
+    const overviewHeight = overviewElement.clientHeight;
+
+    if (overviewHeight <= 0) {
+      setOverviewMarkerLayout({});
+      return;
+    }
+
+    const nextLayout: DiffOverviewMarkerLayout = {};
+
+    overviewMarkers.forEach((marker) => {
+      const startBounds = rowBounds[marker.startIndex];
+      const endBounds = rowBounds[marker.endIndex];
+
+      if (!startBounds || !endBounds) {
+        nextLayout[marker.id] = getFallbackOverviewMarkerLayout(marker);
+        return;
+      }
+
+      const top = (startBounds.top / contentHeight) * overviewHeight;
+      const rawHeight =
+        ((endBounds.bottom - startBounds.top) / contentHeight) * overviewHeight;
+      const height = Math.max(rawHeight, MIN_OVERVIEW_MARKER_HEIGHT);
+      const clampedTop = Math.min(
+        top,
+        Math.max(0, overviewHeight - MIN_OVERVIEW_MARKER_HEIGHT),
+      );
+
+      nextLayout[marker.id] = {
+        height: Math.min(
+          height,
+          Math.max(MIN_OVERVIEW_MARKER_HEIGHT, overviewHeight - clampedTop),
+        ),
+        top: clampedTop,
+      };
+    });
+
+    setOverviewMarkerLayout(nextLayout);
+  }, [overviewMarkers]);
+
+  useLayoutEffect(() => {
+    updateOverviewMarkerLayout();
+
+    const codeLinesElement = codeLinesRef.current;
+    const overviewElement = overviewRef.current;
+
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const resizeObserver = new ResizeObserver(updateOverviewMarkerLayout);
+
+    if (codeLinesElement) {
+      resizeObserver.observe(codeLinesElement);
+    }
+
+    if (overviewElement) {
+      resizeObserver.observe(overviewElement);
+    }
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [updateOverviewMarkerLayout]);
+
   return (
     <div
       className={`split-diff ${showHeaders ? "" : "without-file-headers"} ${className}`.trim()}
@@ -76,10 +261,14 @@ export function SplitDiffFiles({
           </div>
         </>
       ) : null}
-      <div className="code-lines">
+      <div className="code-lines" ref={codeLinesRef}>
         {rows.length > 0 ? (
-          rows.map((row) => (
-            <div key={row.id} className="split-code-row">
+          rows.map((row, index) => (
+            <div
+              key={row.id}
+              className="split-code-row"
+              data-diff-row-index={index}
+            >
               <DiffLineCell row={row} side="left" />
               <DiffLineCell row={row} side="right" />
             </div>
@@ -99,6 +288,21 @@ export function SplitDiffFiles({
           </div>
         )}
       </div>
+      {overviewMarkers.length > 0 ? (
+        <div
+          className="diff-scroll-preview"
+          aria-hidden="true"
+          ref={overviewRef}
+        >
+          {overviewMarkers.map((marker) => (
+            <span
+              className={`diff-scroll-preview-marker ${marker.type}`}
+              key={marker.id}
+              style={getOverviewMarkerStyle(marker, overviewMarkerLayout)}
+            />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
