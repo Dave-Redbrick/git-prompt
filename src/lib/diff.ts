@@ -5,7 +5,7 @@ export type DiffChunk = {
 
 export type LineDiffRow = {
   id: string;
-  type: "same" | "added" | "removed";
+  type: "same" | "added" | "removed" | "changed";
   leftLineNumber: number | null;
   rightLineNumber: number | null;
   leftText: string;
@@ -23,6 +23,111 @@ const splitLines = (value: string) => {
   }
 
   return value.replace(/\n$/, "").split("\n");
+};
+
+const createLineDiffRow = (
+  type: LineDiffRow["type"],
+  index: number,
+  leftLineNumber: number | null,
+  rightLineNumber: number | null,
+  leftText: string,
+  rightText: string,
+): LineDiffRow => ({
+  id: `${type}-${index}-${leftLineNumber ?? "x"}-${rightLineNumber ?? "x"}`,
+  type,
+  leftLineNumber,
+  rightLineNumber,
+  leftText,
+  rightText,
+});
+
+const pairChangedLineBlocks = (rows: LineDiffRow[]) => {
+  const pairedRows: LineDiffRow[] = [];
+
+  const push = (
+    type: LineDiffRow["type"],
+    leftLineNumber: number | null,
+    rightLineNumber: number | null,
+    leftText: string,
+    rightText: string,
+  ) => {
+    pairedRows.push(
+      createLineDiffRow(
+        type,
+        pairedRows.length,
+        leftLineNumber,
+        rightLineNumber,
+        leftText,
+        rightText,
+      ),
+    );
+  };
+
+  const pushChangeBlock = (block: LineDiffRow[]) => {
+    const removedRows = block.filter((row) => row.type === "removed");
+    const addedRows = block.filter((row) => row.type === "added");
+    const pairedCount = Math.min(removedRows.length, addedRows.length);
+
+    if (pairedCount === 0) {
+      block.forEach((row) =>
+        push(
+          row.type,
+          row.leftLineNumber,
+          row.rightLineNumber,
+          row.leftText,
+          row.rightText,
+        ),
+      );
+      return;
+    }
+
+    for (let index = 0; index < pairedCount; index += 1) {
+      const removedRow = removedRows[index];
+      const addedRow = addedRows[index];
+
+      push(
+        "changed",
+        removedRow.leftLineNumber,
+        addedRow.rightLineNumber,
+        removedRow.leftText,
+        addedRow.rightText,
+      );
+    }
+
+    removedRows.slice(pairedCount).forEach((row) =>
+      push("removed", row.leftLineNumber, null, row.leftText, ""),
+    );
+    addedRows.slice(pairedCount).forEach((row) =>
+      push("added", null, row.rightLineNumber, "", row.rightText),
+    );
+  };
+
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+
+    if (row.type === "same") {
+      push(
+        "same",
+        row.leftLineNumber,
+        row.rightLineNumber,
+        row.leftText,
+        row.rightText,
+      );
+      continue;
+    }
+
+    const block: LineDiffRow[] = [];
+
+    while (index < rows.length && rows[index].type !== "same") {
+      block.push(rows[index]);
+      index += 1;
+    }
+
+    pushChangeBlock(block);
+    index -= 1;
+  }
+
+  return pairedRows;
 };
 
 export const diffText = (before: string, after: string): DiffChunk[] => {
@@ -109,14 +214,16 @@ export const diffLines = (before: string, after: string): LineDiffRow[] => {
     leftText: string,
     rightText: string,
   ) => {
-    rows.push({
-      id: `${type}-${rows.length}-${leftLineNumber ?? "x"}-${rightLineNumber ?? "x"}`,
-      type,
-      leftLineNumber,
-      rightLineNumber,
-      leftText,
-      rightText,
-    });
+    rows.push(
+      createLineDiffRow(
+        type,
+        rows.length,
+        leftLineNumber,
+        rightLineNumber,
+        leftText,
+        rightText,
+      ),
+    );
   };
 
   while (leftIndex < left.length && rightIndex < right.length) {
@@ -143,5 +250,5 @@ export const diffLines = (before: string, after: string): LineDiffRow[] => {
     rightIndex += 1;
   }
 
-  return rows;
+  return pairChangedLineBlocks(rows);
 };

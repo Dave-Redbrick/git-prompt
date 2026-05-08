@@ -1519,8 +1519,12 @@ export function App() {
     (block) => block.rows,
   );
   const promptDiffRows = [...systemPromptDiffRows, ...userPromptDiffRows];
-  const addedCount = promptDiffRows.filter((row) => row.type === "added").length;
-  const removedCount = promptDiffRows.filter((row) => row.type === "removed").length;
+  const addedCount = promptDiffRows.filter(
+    (row) => row.type === "added" || row.type === "changed",
+  ).length;
+  const removedCount = promptDiffRows.filter(
+    (row) => row.type === "removed" || row.type === "changed",
+  ).length;
   const latestComparableResultText =
     selectedTopicKind === "text" ? getVersionResultText(latestVersion) : "";
   const draftComparableResultText =

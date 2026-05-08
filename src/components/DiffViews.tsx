@@ -19,13 +19,21 @@ type SplitDiffFilesProps = {
 
 const getDiffCell = (row: LineDiffRow, side: DiffSide) => {
   const isLeft = side === "left";
+  const isChanged = row.type === "changed";
   const visible =
+    isChanged ||
     row.type === "same" ||
     (isLeft && row.type === "removed") ||
     (!isLeft && row.type === "added");
 
   return {
-    className: visible ? row.type : "empty",
+    className: isChanged
+      ? isLeft
+        ? "removed"
+        : "added"
+      : visible
+        ? row.type
+        : "empty",
     lineNumber: isLeft ? row.leftLineNumber : row.rightLineNumber,
     marker: row.type === "same" || !visible ? "" : isLeft ? "-" : "+",
     text: visible ? (isLeft ? row.leftText : row.rightText) || " " : "",
