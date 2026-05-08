@@ -1712,6 +1712,99 @@ textarea::placeholder {
   color: var(--danger);
 }
 
+.system-prompt-field {
+  min-width: 0;
+}
+
+.system-prompt-tab-shell {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.system-prompt-tabs {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid var(--border);
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.system-prompt-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.system-prompt-tab {
+  display: inline-flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+}
+
+.system-prompt-tab:hover,
+.system-prompt-tab:focus-within {
+  background: var(--hover-bg);
+}
+
+.system-prompt-tab.active {
+  border-bottom-color: var(--text);
+  background: transparent;
+}
+
+.system-prompt-tab-button {
+  display: block;
+  max-width: 180px;
+  min-height: 30px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  padding: 0 9px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.system-prompt-tab-input {
+  width: auto;
+  min-height: 30px;
+  border: 0;
+  border-radius: 0;
+  padding: 0 9px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.system-prompt-tab.active .system-prompt-tab-button {
+  color: var(--text);
+}
+
+.system-prompt-tab-button:hover,
+.system-prompt-tab-button:focus {
+  background: var(--hover-bg);
+  color: var(--text);
+  outline: none;
+}
+
+.system-prompt-item {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
 .editor-field textarea {
   min-height: 300px;
   font-family:
@@ -1723,6 +1816,10 @@ textarea::placeholder {
     "Segoe UI",
     sans-serif;
   line-height: 1.65;
+}
+
+.system-prompt-item textarea {
+  min-height: 300px;
 }
 
 .result-text-field textarea {

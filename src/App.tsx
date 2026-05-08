@@ -1,6 +1,5 @@
 import {
   ChangeEvent,
-  ClipboardEvent as ReactClipboardEvent,
   FormEvent,
   useCallback,
   useEffect,
@@ -71,17 +70,23 @@ import { diffLines } from "./lib/diff";
 import { useUsdKrwExchangeRate } from "./lib/exchangeRate";
 import {
   countImageResultMedia,
+  copySystemPromptsToDraft,
+  createSystemPrompt,
   copyImagesToDraft,
   draftImagesMatchStoredImages,
   getTopicKind,
   getCombinedPromptText,
+  getSystemPromptText,
   getVersionKind,
   getVersionResultText,
   getVersionResultTexts,
+  getVersionSystemPrompts,
   getVersionUserPrompt,
   joinResultTexts,
   normalizeResultTexts,
+  normalizeSystemPrompts,
   getResultMediaKind,
+  systemPromptListsMatch,
 } from "./lib/promptVersions";
 import {
   createProjectArchiveZip,
@@ -96,6 +101,7 @@ import type {
   PromptDraft,
   PromptVersion,
   PromptVersionKind,
+  SystemPrompt,
   Theme,
   TopicModelConfig,
   TopicModelId,
@@ -135,6 +141,22 @@ type RenameTarget = {
   kind: "project" | "theme" | "topic";
   id: string;
   value: string;
+};
+
+type SystemPromptDiffBlock = {
+  key: string;
+  label: string;
+  rows: ReturnType<typeof diffLines>;
+};
+
+type DraftHistorySnapshot = {
+  images: DraftImage[];
+  kind: PromptVersionKind;
+  label: string;
+  notes: string;
+  resultTexts: string[];
+  systemPrompts: SystemPrompt[];
+  userPrompt: string;
 };
 
 type StoreState = {
@@ -284,26 +306,195 @@ const readCustomModels = (): TopicModelConfig[] => {
   }
 };
 
-const fileToDraftImage = (
-  file: File,
-  fallbackName = "clipboard-image.png",
-): Promise<DraftImage> =>
+const imageOptimizationMinBytes = 1_000_000;
+const imageOptimizationQuality = 0.86;
+const imageOptimizationTypes = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
+const imageOptimizationExtensions: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+};
+
+const readBlobAsDataUrl = (blob: Blob): Promise<string> =>
   new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(reader.error);
-    reader.onload = () => {
-      const type = file.type || "application/octet-stream";
+    reader.onload = () => resolve(String(reader.result));
+    reader.readAsDataURL(blob);
+  });
 
+const getFhdImageBounds = (width: number, height: number) =>
+  width >= height
+    ? { width: 1920, height: 1080 }
+    : { width: 1080, height: 1920 };
+
+const getOptimizedImageName = (name: string, type: string) => {
+  const extension = imageOptimizationExtensions[type];
+  if (!extension) {
+    return name;
+  }
+
+  return /\.[^.]+$/.test(name)
+    ? name.replace(/\.[^.]+$/, `.${extension}`)
+    : `${name}.${extension}`;
+};
+
+const canvasToBlob = (
+  canvas: HTMLCanvasElement,
+  type: string,
+  quality?: number,
+): Promise<Blob | null> =>
+  new Promise((resolve) => canvas.toBlob(resolve, type, quality));
+
+const canvasHasTransparency = (
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+) => {
+  const data = context.getImageData(0, 0, width, height).data;
+
+  for (let index = 3; index < data.length; index += 4) {
+    if (data[index] < 255) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+type DecodedImageSource = {
+  cleanup: () => void;
+  height: number;
+  source: CanvasImageSource;
+  width: number;
+};
+
+const decodeImageFile = async (file: File): Promise<DecodedImageSource> => {
+  if (typeof createImageBitmap === "function") {
+    const bitmap = await createImageBitmap(file, {
+      imageOrientation: "from-image",
+    });
+
+    return {
+      cleanup: () => bitmap.close(),
+      height: bitmap.height,
+      source: bitmap,
+      width: bitmap.width,
+    };
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("Failed to decode image file."));
+    };
+    image.onload = () => {
       resolve({
-        id: createId(),
-        name: file.name || fallbackName,
-        kind: getResultMediaKind({ name: file.name || fallbackName, type }),
-        type,
-        dataUrl: String(reader.result),
+        cleanup: () => URL.revokeObjectURL(objectUrl),
+        height: image.naturalHeight || image.height,
+        source: image,
+        width: image.naturalWidth || image.width,
       });
     };
-    reader.readAsDataURL(file);
+    image.src = objectUrl;
   });
+};
+
+const optimizeImageFile = async (
+  file: File,
+  name: string,
+): Promise<{ blob: Blob; name: string; type: string } | null> => {
+  const sourceType = file.type || "application/octet-stream";
+  if (!imageOptimizationTypes.has(sourceType)) {
+    return null;
+  }
+
+  let decodedImage: DecodedImageSource | null = null;
+
+  try {
+    decodedImage = await decodeImageFile(file);
+    const bounds = getFhdImageBounds(decodedImage.width, decodedImage.height);
+    const scale = Math.min(
+      1,
+      bounds.width / decodedImage.width,
+      bounds.height / decodedImage.height,
+    );
+
+    if (scale === 1 && file.size < imageOptimizationMinBytes) {
+      return null;
+    }
+
+    const targetWidth = Math.max(1, Math.round(decodedImage.width * scale));
+    const targetHeight = Math.max(1, Math.round(decodedImage.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return null;
+    }
+
+    context.drawImage(decodedImage.source, 0, 0, targetWidth, targetHeight);
+
+    const targetType =
+      sourceType === "image/png" &&
+      canvasHasTransparency(context, targetWidth, targetHeight)
+        ? "image/png"
+        : sourceType === "image/webp"
+          ? "image/webp"
+          : "image/jpeg";
+    const blob = await canvasToBlob(
+      canvas,
+      targetType,
+      targetType === "image/png" ? undefined : imageOptimizationQuality,
+    );
+
+    if (!blob || (scale === 1 && blob.size >= file.size)) {
+      return null;
+    }
+
+    const blobType = blob.type || targetType;
+
+    return {
+      blob,
+      name: getOptimizedImageName(name, blobType),
+      type: blobType,
+    };
+  } catch {
+    return null;
+  } finally {
+    decodedImage?.cleanup();
+  }
+};
+
+const fileToDraftImage = async (
+  file: File,
+  fallbackName = "clipboard-image.png",
+): Promise<DraftImage> => {
+  const name = file.name || fallbackName;
+  const type = file.type || "application/octet-stream";
+  const kind = getResultMediaKind({ name, type });
+  const optimizedImage =
+    kind === "image" ? await optimizeImageFile(file, name) : null;
+  const blob = optimizedImage?.blob ?? file;
+  const dataUrl = await readBlobAsDataUrl(blob);
+
+  return {
+    id: createId(),
+    name: optimizedImage?.name ?? name,
+    kind,
+    type: optimizedImage?.type ?? type,
+    dataUrl,
+  };
+};
 
 const getCurrentClipboardImageFiles = (clipboardData: DataTransfer) => {
   const types = Array.from(clipboardData.types);
@@ -368,6 +559,108 @@ const upsertDraft = (drafts: PromptDraft[], draft: PromptDraft) => {
 
   return [...nextDrafts, draft];
 };
+
+const draftHistoryLimit = 30;
+
+const cloneSystemPrompts = (systemPrompts: SystemPrompt[]) =>
+  systemPrompts.map((prompt) => ({ ...prompt }));
+
+const cloneDraftImages = (images: DraftImage[]) =>
+  images.map((image) => ({ ...image }));
+
+const draftImagesEqual = (left: DraftImage[], right: DraftImage[]) =>
+  left.length === right.length &&
+  left.every((image, index) => {
+    const other = right[index];
+
+    return (
+      image.id === other?.id &&
+      image.sourceId === other?.sourceId &&
+      image.kind === other?.kind &&
+      image.name === other?.name &&
+      image.type === other?.type &&
+      image.dataUrl === other?.dataUrl
+    );
+  });
+
+const systemPromptsEqual = (left: SystemPrompt[], right: SystemPrompt[]) =>
+  left.length === right.length &&
+  left.every((prompt, index) => {
+    const other = right[index];
+
+    return (
+      prompt.id === other?.id &&
+      prompt.name === other?.name &&
+      prompt.body === other?.body
+    );
+  });
+
+const draftHistorySnapshotsEqual = (
+  left: DraftHistorySnapshot,
+  right: DraftHistorySnapshot,
+) =>
+  left.kind === right.kind &&
+  left.label === right.label &&
+  left.notes === right.notes &&
+  left.userPrompt === right.userPrompt &&
+  left.resultTexts.length === right.resultTexts.length &&
+  left.resultTexts.every((text, index) => text === right.resultTexts[index]) &&
+  systemPromptsEqual(left.systemPrompts, right.systemPrompts) &&
+  draftImagesEqual(left.images, right.images);
+
+const getSystemPromptBuckets = (systemPrompts: SystemPrompt[]) =>
+  systemPrompts.reduce<Map<string, SystemPrompt[]>>((buckets, prompt) => {
+    const prompts = buckets.get(prompt.name) ?? [];
+
+    buckets.set(prompt.name, [...prompts, prompt]);
+
+    return buckets;
+  }, new Map());
+
+const buildSystemPromptDiffBlocks = (
+  baseSystemPrompts: SystemPrompt[],
+  targetSystemPrompts: SystemPrompt[],
+): SystemPromptDiffBlock[] => {
+  const normalizedBasePrompts =
+    baseSystemPrompts.length > 0 ? normalizeSystemPrompts(baseSystemPrompts) : [];
+  const normalizedTargetPrompts =
+    targetSystemPrompts.length > 0
+      ? normalizeSystemPrompts(targetSystemPrompts)
+      : [];
+  const orderedNames: string[] = [];
+  const addOrderedName = (name: string) => {
+    if (!orderedNames.includes(name)) {
+      orderedNames.push(name);
+    }
+  };
+
+  normalizedBasePrompts.forEach((prompt) => addOrderedName(prompt.name));
+  normalizedTargetPrompts.forEach((prompt) => addOrderedName(prompt.name));
+
+  const baseBuckets = getSystemPromptBuckets(normalizedBasePrompts);
+  const targetBuckets = getSystemPromptBuckets(normalizedTargetPrompts);
+
+  return orderedNames.flatMap((name) => {
+    const basePrompts = baseBuckets.get(name) ?? [];
+    const targetPrompts = targetBuckets.get(name) ?? [];
+    const count = Math.max(basePrompts.length, targetPrompts.length);
+
+    return Array.from({ length: count }, (_item, index) => ({
+      key: `${name}:${index}`,
+      label: count > 1 ? `${name} #${index + 1}` : name,
+      rows: diffLines(
+        basePrompts[index]?.body ?? "",
+        targetPrompts[index]?.body ?? "",
+      ),
+    }));
+  });
+};
+
+const toStoredSystemPrompts = (systemPrompts: SystemPrompt[]) =>
+  normalizeSystemPrompts(systemPrompts).map((prompt) => ({
+    ...prompt,
+    body: prompt.body.trim(),
+  }));
 
 export function App() {
   const savedSelection = useMemo(readSelection, []);
@@ -436,12 +729,21 @@ export function App() {
   const [draftKind, setDraftKind] = useState<PromptVersionKind>("text");
   const [draftLabel, setDraftLabel] = useState("");
   const [draftBody, setDraftBody] = useState("");
+  const [draftSystemPrompts, setDraftSystemPrompts] = useState<SystemPrompt[]>(
+    () => [createSystemPrompt()],
+  );
   const [draftUserPrompt, setDraftUserPrompt] = useState("");
   const [draftResultTexts, setDraftResultTexts] = useState<string[]>([""]);
   const [draftNotes, setDraftNotes] = useState("");
   const [draftImages, setDraftImages] = useState<DraftImage[]>([]);
   const [editingVersionId, setEditingVersionId] = useState<string | null>(null);
   const [pasteTargetActive, setPasteTargetActive] = useState(false);
+  const [draftUndoStack, setDraftUndoStack] = useState<DraftHistorySnapshot[]>(
+    [],
+  );
+  const [draftRedoStack, setDraftRedoStack] = useState<DraftHistorySnapshot[]>(
+    [],
+  );
   const ui = messages[locale];
   const usdKrwExchangeRate = useUsdKrwExchangeRate(locale === "ko");
 
@@ -451,6 +753,11 @@ export function App() {
 
   const requestConfirm = (dialog: ConfirmDialogState) => {
     setConfirmDialog(dialog);
+  };
+
+  const clearDraftHistory = () => {
+    setDraftUndoStack([]);
+    setDraftRedoStack([]);
   };
 
   const selectCustomModelKind = (kind: TopicModelKind) => {
@@ -662,16 +969,29 @@ export function App() {
   const selectedTopicDraft =
     store.drafts.find((draft) => draft.topicId === selectedTopicId) ?? null;
 
+  function syncDraftSystemPrompts(systemPrompts: SystemPrompt[]) {
+    const nextSystemPrompts =
+      systemPrompts.length > 0 ? systemPrompts : [createSystemPrompt()];
+
+    setDraftSystemPrompts(nextSystemPrompts);
+    setDraftBody(getSystemPromptText(nextSystemPrompts));
+  }
+
   function createDefaultDraftState(updatedAt = nowIso()): PromptDraft | null {
     if (!selectedTopicId) {
       return null;
     }
 
+    const systemPrompts = latestVersion
+      ? copySystemPromptsToDraft(latestVersion)
+      : [createSystemPrompt()];
+
     return {
       topicId: selectedTopicId,
       kind: selectedTopicKind,
       label: latestVersion ? `v${topicVersions.length + 1}` : ui.draftLabel,
-      body: latestVersion?.body ?? "",
+      body: getSystemPromptText(systemPrompts),
+      systemPrompts,
       userPrompt: getVersionUserPrompt(latestVersion),
       resultTexts: [""],
       notes: "",
@@ -687,7 +1007,7 @@ export function App() {
 
     setDraftLabel(draft.label);
     setDraftKind(draft.kind ?? selectedTopicKind);
-    setDraftBody(draft.body);
+    syncDraftSystemPrompts(copySystemPromptsToDraft(draft));
     setDraftUserPrompt(draft.userPrompt ?? "");
     setDraftResultTexts(toEditableResultTexts(draft.resultTexts ?? []));
     setDraftNotes(draft.notes);
@@ -703,7 +1023,8 @@ export function App() {
       topicId: selectedTopicId,
       kind: draftKind,
       label: draftLabel,
-      body: draftBody,
+      body: getSystemPromptText(draftSystemPrompts),
+      systemPrompts: normalizeSystemPrompts(draftSystemPrompts),
       userPrompt: draftUserPrompt,
       resultTexts: draftResultTexts,
       notes: draftNotes,
@@ -998,6 +1319,7 @@ export function App() {
       setDraftKind("text");
       setDraftLabel("");
       setDraftBody("");
+      setDraftSystemPrompts([createSystemPrompt()]);
       setDraftUserPrompt("");
       setDraftResultTexts([""]);
       setDraftNotes("");
@@ -1005,6 +1327,7 @@ export function App() {
       setEditingVersionId(null);
       setActiveVersionId("draft");
       setMainView("write");
+      clearDraftHistory();
       return;
     }
 
@@ -1012,6 +1335,7 @@ export function App() {
     setEditingVersionId(null);
     setActiveVersionId("draft");
     setMainView("write");
+    clearDraftHistory();
   }, [loading, selectedTopicId]);
 
   const selectedStoredVersion =
@@ -1035,9 +1359,9 @@ export function App() {
     editingVersion?.modelIds ??
     selectedStoredVersion?.modelIds ??
     selectedTopicModelIds;
-  const writePanelBody = isVersionView
-    ? (selectedStoredVersion?.body ?? "")
-    : draftBody;
+  const writePanelSystemPrompts = isVersionView
+    ? getVersionSystemPrompts(selectedStoredVersion)
+    : draftSystemPrompts;
   const writePanelResultTexts = isVersionView
     ? getEditableVersionResultTexts(selectedStoredVersion)
     : draftResultTexts;
@@ -1105,13 +1429,15 @@ export function App() {
   const compareTargetKind = compareTargetVersion
     ? getVersionKind(compareTargetVersion)
     : selectedTopicKind;
-  const compareBaseSystemPrompt = compareBase?.body ?? "";
+  const compareBaseSystemPrompts = compareBase
+    ? getVersionSystemPrompts(compareBase)
+    : [];
   const compareBaseUserPrompt = compareBase
     ? getVersionUserPrompt(compareBase)
     : "";
-  const compareTargetSystemPrompt = compareTargetVersion
-    ? compareTargetVersion.body
-    : draftBody;
+  const compareTargetSystemPrompts = compareTargetVersion
+    ? getVersionSystemPrompts(compareTargetVersion)
+    : draftSystemPrompts;
   const compareTargetUserPrompt = compareTargetVersion
     ? getVersionUserPrompt(compareTargetVersion)
     : draftUserPrompt;
@@ -1155,9 +1481,13 @@ export function App() {
     : [];
   const comparableLatestImages = latestImages;
   const comparableDraftImages = draftImages;
-  const systemPromptDiffRows = useMemo(
-    () => diffLines(compareBaseSystemPrompt, compareTargetSystemPrompt),
-    [compareBaseSystemPrompt, compareTargetSystemPrompt],
+  const systemPromptDiffBlocks = useMemo(
+    () =>
+      buildSystemPromptDiffBlocks(
+        compareBaseSystemPrompts,
+        compareTargetSystemPrompts,
+      ),
+    [compareBaseSystemPrompts, compareTargetSystemPrompts],
   );
   const userPromptDiffRows = useMemo(
     () => diffLines(compareBaseUserPrompt, compareTargetUserPrompt),
@@ -1181,6 +1511,9 @@ export function App() {
     setBaseResultDiffIndex(0);
     setTargetResultDiffIndex(0);
   }, [activeVersionId, compareDirection, compareTargetKind]);
+  const systemPromptDiffRows = systemPromptDiffBlocks.flatMap(
+    (block) => block.rows,
+  );
   const promptDiffRows = [...systemPromptDiffRows, ...userPromptDiffRows];
   const addedCount = promptDiffRows.filter((row) => row.type === "added").length;
   const removedCount = promptDiffRows.filter((row) => row.type === "removed").length;
@@ -1192,7 +1525,10 @@ export function App() {
     currentDraftCostMetrics.modelAddedIds.length > 0 ||
     currentDraftCostMetrics.modelRemovedIds.length > 0;
   const rawDraftChanges =
-    (latestVersion?.body ?? "") !== draftBody ||
+    !systemPromptListsMatch(
+      getVersionSystemPrompts(latestVersion),
+      draftSystemPrompts,
+    ) ||
     getVersionUserPrompt(latestVersion) !== draftUserPrompt ||
     (latestVersion?.notes ?? "") !== draftNotes.trim() ||
     latestComparableResultText !== draftComparableResultText ||
@@ -1212,7 +1548,7 @@ export function App() {
   const hasDraftChanges = !editingVersion && !isVersionView && rawDraftChanges;
   const hasDraftPromptInput =
     getCombinedPromptText({
-      body: draftBody,
+      systemPrompts: draftSystemPrompts,
       userPrompt: draftUserPrompt,
     }).trim().length > 0;
   const canSaveDraft =
@@ -1224,13 +1560,128 @@ export function App() {
     Boolean(editingVersion) &&
     hasVersionEditChanges &&
     getCombinedPromptText({
-      body: draftBody,
+      systemPrompts: draftSystemPrompts,
       userPrompt: draftUserPrompt,
     }).trim().length > 0 &&
     draftResultCount > 0;
   const canSaveCurrentVersion = editingVersion
     ? canSaveVersionEdit
     : canSaveDraft;
+
+  const createDraftHistorySnapshot = (): DraftHistorySnapshot => ({
+    images: cloneDraftImages(draftImages),
+    kind: draftKind,
+    label: draftLabel,
+    notes: draftNotes,
+    resultTexts: [...draftResultTexts],
+    systemPrompts: cloneSystemPrompts(draftSystemPrompts),
+    userPrompt: draftUserPrompt,
+  });
+
+  const restoreDraftHistorySnapshot = (snapshot: DraftHistorySnapshot) => {
+    setDraftKind(snapshot.kind);
+    setDraftLabel(snapshot.label);
+    syncDraftSystemPrompts(cloneSystemPrompts(snapshot.systemPrompts));
+    setDraftUserPrompt(snapshot.userPrompt);
+    setDraftResultTexts([...snapshot.resultTexts]);
+    setDraftNotes(snapshot.notes);
+    setDraftImages(cloneDraftImages(snapshot.images));
+    setActiveVersionId(editingVersionId ?? "draft");
+  };
+
+  const recordDraftHistorySnapshot = (force = false) => {
+    if (
+      !force &&
+      (loading ||
+        !selectedTopicId ||
+        editingVersionId ||
+        isVersionView)
+    ) {
+      return;
+    }
+
+    const snapshot = createDraftHistorySnapshot();
+
+    setDraftUndoStack((current) => {
+      const lastSnapshot = current[current.length - 1];
+
+      if (lastSnapshot && draftHistorySnapshotsEqual(lastSnapshot, snapshot)) {
+        return current;
+      }
+
+      return [...current, snapshot].slice(-draftHistoryLimit);
+    });
+    setDraftRedoStack([]);
+  };
+
+  const undoDraftHistory = () => {
+    if (draftUndoStack.length === 0) {
+      return;
+    }
+
+    const previousSnapshot = draftUndoStack[draftUndoStack.length - 1];
+    const currentSnapshot = createDraftHistorySnapshot();
+
+    setDraftUndoStack(draftUndoStack.slice(0, -1));
+    setDraftRedoStack((current) =>
+      [currentSnapshot, ...current].slice(0, draftHistoryLimit),
+    );
+    restoreDraftHistorySnapshot(previousSnapshot);
+  };
+
+  const redoDraftHistory = () => {
+    if (draftRedoStack.length === 0) {
+      return;
+    }
+
+    const nextSnapshot = draftRedoStack[0];
+    const currentSnapshot = createDraftHistorySnapshot();
+
+    setDraftRedoStack(draftRedoStack.slice(1));
+    setDraftUndoStack((current) =>
+      [...current, currentSnapshot].slice(-draftHistoryLimit),
+    );
+    restoreDraftHistorySnapshot(nextSnapshot);
+  };
+
+  useEffect(() => {
+    const handleDraftHistoryKeydown = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      const modifierPressed = event.ctrlKey || event.metaKey;
+      const isUndoShortcut =
+        modifierPressed && key === "z" && !event.altKey && !event.shiftKey;
+      const isRedoShortcut =
+        modifierPressed &&
+        !event.altKey &&
+        ((key === "z" && event.shiftKey) || key === "y");
+
+      if (
+        confirmDialog ||
+        editingVersionId ||
+        isVersionView ||
+        mainView !== "write" ||
+        !selectedTopicId ||
+        (!isUndoShortcut && !isRedoShortcut)
+      ) {
+        return;
+      }
+
+      if (isUndoShortcut && draftUndoStack.length > 0) {
+        event.preventDefault();
+        undoDraftHistory();
+      }
+
+      if (isRedoShortcut && draftRedoStack.length > 0) {
+        event.preventDefault();
+        redoDraftHistory();
+      }
+    };
+
+    document.addEventListener("keydown", handleDraftHistoryKeydown);
+    return () => {
+      document.removeEventListener("keydown", handleDraftHistoryKeydown);
+    };
+  });
 
   useEffect(() => {
     if (
@@ -1265,6 +1716,7 @@ export function App() {
     draftLabel,
     draftNotes,
     draftResultTexts,
+    draftSystemPrompts,
     draftUserPrompt,
     editingVersionId,
     loading,
@@ -1821,12 +2273,69 @@ export function App() {
     await refresh();
   };
 
+  const commitDraftSystemPrompts = (systemPrompts: SystemPrompt[]) => {
+    recordDraftHistorySnapshot();
+    syncDraftSystemPrompts(systemPrompts);
+    markEditorChanged();
+  };
+
+  const handleAddDraftSystemPrompt = () => {
+    commitDraftSystemPrompts([
+      ...draftSystemPrompts,
+      createSystemPrompt("", `system-${draftSystemPrompts.length + 1}`),
+    ]);
+  };
+
+  const handleDraftSystemPromptNameChange = (index: number, value: string) => {
+    commitDraftSystemPrompts(
+      draftSystemPrompts.map((prompt, currentIndex) =>
+        currentIndex === index ? { ...prompt, name: value } : prompt,
+      ),
+    );
+  };
+
+  const handleDraftSystemPromptBodyChange = (index: number, value: string) => {
+    commitDraftSystemPrompts(
+      draftSystemPrompts.map((prompt, currentIndex) =>
+        currentIndex === index ? { ...prompt, body: value } : prompt,
+      ),
+    );
+  };
+
+  const deleteDraftSystemPrompt = (index: number) => {
+    const nextSystemPrompts = draftSystemPrompts.filter(
+      (_prompt, currentIndex) => currentIndex !== index,
+    );
+
+    commitDraftSystemPrompts(nextSystemPrompts);
+    showToast(ui.systemPromptDeleted);
+  };
+
+  const handleDraftSystemPromptDelete = (index: number) => {
+    const systemPrompt = draftSystemPrompts[index];
+    const systemPromptName =
+      systemPrompt?.name.trim() || ui.systemPromptIndex(index + 1);
+
+    requestConfirm({
+      title: ui.deleteSystemPromptTitle,
+      message: ui.deleteSystemPromptMessage(systemPromptName),
+      confirmLabel: ui.delete,
+      onConfirm: () => deleteDraftSystemPrompt(index),
+    });
+  };
+
+  const resetDraftSystemPrompts = () => {
+    commitDraftSystemPrompts(copySystemPromptsToDraft(editingVersion ?? latestVersion));
+  };
+
   const handleAddDraftResultText = () => {
+    recordDraftHistorySnapshot();
     setDraftResultTexts((current) => [...toEditableResultTexts(current), ""]);
     markEditorChanged();
   };
 
   const handleDraftResultTextChange = (index: number, value: string) => {
+    recordDraftHistorySnapshot();
     setDraftResultTexts((current) => {
       const next = [...toEditableResultTexts(current)];
       next[index] = value;
@@ -1836,6 +2345,7 @@ export function App() {
   };
 
   const deleteDraftResultText = (index: number) => {
+    recordDraftHistorySnapshot();
     setDraftResultTexts((current) => {
       const next = toEditableResultTexts(current).filter(
         (_text, currentIndex) => currentIndex !== index,
@@ -1857,6 +2367,7 @@ export function App() {
   };
 
   const resetDraftResultTexts = () => {
+    recordDraftHistorySnapshot();
     setDraftResultTexts(getEditableVersionResultTexts(editingVersion ?? latestVersion));
     markEditorChanged();
   };
@@ -1873,6 +2384,7 @@ export function App() {
     const loadedImages = await Promise.all(
       files.map((file) => fileToDraftImage(file)),
     );
+    recordDraftHistorySnapshot();
     setDraftImages((current) => [...current, ...loadedImages]);
     markEditorChanged();
     event.target.value = "";
@@ -1908,6 +2420,7 @@ export function App() {
         ),
       );
 
+      recordDraftHistorySnapshot();
       setDraftImages((current) => [...current, ...images]);
       setActiveVersionId(editingVersionId ?? "draft");
       setToast({ id: Date.now(), message: ui.imagesPasted, variant: "success" });
@@ -1915,17 +2428,12 @@ export function App() {
     [
       editingVersionId,
       editorTopicKind,
+      recordDraftHistorySnapshot,
       selectedTopicId,
       ui.imagesPasted,
       ui.noClipboardImage,
     ],
   );
-
-  const handleImagePaste = async (
-    event: ReactClipboardEvent<HTMLButtonElement>,
-  ) => {
-    await pasteClipboardImages(event.clipboardData, () => event.preventDefault());
-  };
 
   useEffect(() => {
     if (
@@ -1938,6 +2446,10 @@ export function App() {
     }
 
     const handleDocumentPaste = (event: ClipboardEvent) => {
+      if (event.defaultPrevented) {
+        return;
+      }
+
       void pasteClipboardImages(event.clipboardData, () => event.preventDefault());
     };
 
@@ -1983,6 +2495,7 @@ export function App() {
         ),
       }));
     } else {
+      recordDraftHistorySnapshot();
       markEditorChanged();
     }
 
@@ -2009,7 +2522,8 @@ export function App() {
       return;
     }
 
-    const body = draftBody.trim();
+    const systemPrompts = toStoredSystemPrompts(draftSystemPrompts);
+    const body = getSystemPromptText(systemPrompts);
     const userPrompt = draftUserPrompt.trim();
     if (!getCombinedPromptText({ body, userPrompt }).trim()) {
       showToast(ui.promptEmpty, "error");
@@ -2047,6 +2561,7 @@ export function App() {
       costSnapshot: createCostSnapshot(snapshotMetrics),
       label: draftLabel.trim() || `v${topicVersions.length + 1}`,
       body,
+      systemPrompts,
       userPrompt,
       resultText: selectedTopicKind === "text" ? resultText : "",
       resultTexts: selectedTopicKind === "text" ? resultTexts : [],
@@ -2078,11 +2593,16 @@ export function App() {
       modelIds: selectedTopicModelIds,
       updatedAt: createdAt,
     };
+    const nextDraftSystemPrompts = systemPrompts.map((prompt) => ({
+      ...prompt,
+      id: createId(),
+    }));
     const nextDraft: PromptDraft = {
       topicId: selectedTopic.id,
       kind: selectedTopicKind,
       label: `v${topicVersions.length + 2}`,
-      body,
+      body: getSystemPromptText(nextDraftSystemPrompts),
+      systemPrompts: nextDraftSystemPrompts,
       userPrompt,
       resultTexts: [""],
       notes: "",
@@ -2104,6 +2624,7 @@ export function App() {
       drafts: upsertDraft(current.drafts, nextDraft),
     }));
     applyDraftState(nextDraft);
+    clearDraftHistory();
     setActiveVersionId(versionId);
     setCompareDirection("previous");
     setBaseResultDiffIndex(0);
@@ -2207,6 +2728,7 @@ export function App() {
 
     await refresh();
     applyDraftState(selectedTopicDraft ?? createDefaultDraftState());
+    clearDraftHistory();
     setEditingVersionId(null);
     setActiveVersionId(editingVersion.id);
     setMainView("write");
@@ -2261,6 +2783,9 @@ export function App() {
     );
     const remainingLatest =
       remainingVersions[remainingVersions.length - 1] ?? null;
+    const fallbackSystemPrompts = remainingLatest
+      ? copySystemPromptsToDraft(remainingLatest)
+      : [createSystemPrompt()];
     applyDraftState(
       selectedTopicDraft ?? {
         topicId: selectedTopicId,
@@ -2268,7 +2793,8 @@ export function App() {
         label: remainingLatest
           ? `v${remainingVersions.length + 1}`
           : ui.draftLabel,
-        body: remainingLatest?.body ?? "",
+        body: getSystemPromptText(fallbackSystemPrompts),
+        systemPrompts: fallbackSystemPrompts,
         userPrompt: getVersionUserPrompt(remainingLatest),
         resultTexts: [""],
         notes: "",
@@ -2276,6 +2802,7 @@ export function App() {
         updatedAt: nowIso(),
       },
     );
+    clearDraftHistory();
     if (editingVersionId === versionId) {
       setEditingVersionId(null);
     }
@@ -2293,8 +2820,9 @@ export function App() {
 
   const cherryPickVersion = (version: PromptVersion) => {
     setEditingVersionId(null);
+    recordDraftHistorySnapshot(true);
     setDraftKind(selectedTopicKind);
-    setDraftBody(version.body);
+    syncDraftSystemPrompts(copySystemPromptsToDraft(version));
     setDraftUserPrompt(getVersionUserPrompt(version));
     setDraftResultTexts([""]);
     setDraftNotes("");
@@ -2313,13 +2841,14 @@ export function App() {
     setEditingVersionId(version.id);
     setDraftLabel(version.label);
     setDraftKind(kind);
-    setDraftBody(version.body);
+    syncDraftSystemPrompts(copySystemPromptsToDraft(version));
     setDraftUserPrompt(getVersionUserPrompt(version));
     setDraftResultTexts(getEditableVersionResultTexts(version));
     setDraftNotes(version.notes);
     setDraftImages(
       kind !== "text" ? copyImagesToDraft(imagesByVersion[version.id] ?? []) : [],
     );
+    clearDraftHistory();
     setActiveVersionId(version.id);
     setMainView("write");
   };
@@ -2327,6 +2856,7 @@ export function App() {
   const cancelVersionEdit = () => {
     setEditingVersionId(null);
     applyDraftState(selectedTopicDraft ?? createDefaultDraftState());
+    clearDraftHistory();
     setActiveVersionId("draft");
     setMainView("write");
   };
@@ -3369,42 +3899,46 @@ export function App() {
               {mainView === "write" ? (
                 <WritePanel
                   audioGroupId={`write:${editingVersion?.id ?? selectedStoredVersion?.id ?? "draft"}`}
-                  draftBody={writePanelBody}
                   draftImages={writePanelImages}
                   draftLabel={writePanelLabel}
                   draftNotes={writePanelNotes}
                   draftResultTexts={writePanelResultTexts}
+                  draftSystemPrompts={writePanelSystemPrompts}
                   draftUserPrompt={writePanelUserPrompt}
                   isVersionEdit={Boolean(editingVersion)}
                   isVersionView={isVersionView}
                   modelOptions={selectedTopicModelOptions}
                   pasteTargetActive={pasteTargetActive}
-                  previousBody={editingVersion?.body ?? latestVersion?.body ?? ""}
                   previousUserPrompt={getVersionUserPrompt(
                     editingVersion ?? latestVersion,
                   )}
                   selectedModelIds={editorModelIds}
                   selectedTopicKind={editorTopicKind}
                   ui={ui}
-                  onDraftBodyChange={(value) => {
-                    setDraftBody(value);
-                    markEditorChanged();
-                  }}
+                  onAddDraftSystemPrompt={handleAddDraftSystemPrompt}
                   onDraftLabelChange={(value) => {
+                    recordDraftHistorySnapshot();
                     setDraftLabel(value);
                     markEditorChanged();
                   }}
                   onDraftNotesChange={(value) => {
+                    recordDraftHistorySnapshot();
                     setDraftNotes(value);
                     markEditorChanged();
                   }}
                   onAddDraftResultText={handleAddDraftResultText}
                   onDraftResultTextChange={handleDraftResultTextChange}
+                  onDraftSystemPromptBodyChange={
+                    handleDraftSystemPromptBodyChange
+                  }
+                  onDraftSystemPromptNameChange={
+                    handleDraftSystemPromptNameChange
+                  }
                   onDraftUserPromptChange={(value) => {
+                    recordDraftHistorySnapshot();
                     setDraftUserPrompt(value);
                     markEditorChanged();
                   }}
-                  onImagePaste={handleImagePaste}
                   onImageUpload={handleImageUpload}
                   onModelChange={(value) =>
                     void updateSelectedTopicModels(value)
@@ -3412,7 +3946,9 @@ export function App() {
                   onPasteTargetActiveChange={setPasteTargetActive}
                   onRemoveDraftImage={handleDraftImageDelete}
                   onRemoveDraftResultText={handleDraftResultTextDelete}
+                  onRemoveDraftSystemPrompt={handleDraftSystemPromptDelete}
                   onResetDraftResultTexts={resetDraftResultTexts}
+                  onResetDraftSystemPrompts={resetDraftSystemPrompts}
                 />
               ) : mainView === "diff" ? (
                 <DiffPanel
@@ -3436,7 +3972,7 @@ export function App() {
                   )}
                   targetResultDiffCount={targetResultDiffCount}
                   targetResultDiffIndex={effectiveTargetResultDiffIndex}
-                  systemPromptDiffRows={systemPromptDiffRows}
+                  systemPromptDiffBlocks={systemPromptDiffBlocks}
                   ui={ui}
                   userPromptDiffRows={userPromptDiffRows}
                   onBaseResultDiffIndexChange={setBaseResultDiffIndex}

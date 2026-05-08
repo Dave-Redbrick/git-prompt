@@ -7,47 +7,51 @@ import {
   Undo2,
   Video,
 } from "lucide-react";
-import { useRef } from "react";
-import type {
-  ChangeEvent,
-  ClipboardEvent as ReactClipboardEvent,
-} from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent } from "react";
 import type { UiMessages } from "../i18n";
-import type { DraftImage, PromptVersionKind, TopicModelId } from "../types";
+import type {
+  DraftImage,
+  PromptVersionKind,
+  SystemPrompt,
+  TopicModelId,
+} from "../types";
 import { pauseOtherAudioInGroup } from "../lib/audioPlayback";
-import { getResultMediaKind } from "../lib/promptVersions";
+import { getResultMediaKind, getSystemPromptText } from "../lib/promptVersions";
 import { TagPopoverSelect, type TagPopoverOption } from "./TagPopoverSelect";
 
 type WritePanelProps = {
-  draftBody: string;
   draftImages: DraftImage[];
   draftLabel: string;
   draftNotes: string;
   draftResultTexts: string[];
+  draftSystemPrompts: SystemPrompt[];
   draftUserPrompt: string;
   audioGroupId: string;
   isVersionEdit?: boolean;
   isVersionView?: boolean;
   modelOptions: TagPopoverOption[];
   pasteTargetActive: boolean;
-  previousBody: string;
   previousUserPrompt: string;
   selectedModelIds: TopicModelId[];
   selectedTopicKind: PromptVersionKind;
   ui: UiMessages;
-  onDraftBodyChange: (value: string) => void;
+  onAddDraftSystemPrompt: () => void;
   onDraftLabelChange: (value: string) => void;
   onDraftNotesChange: (value: string) => void;
   onAddDraftResultText: () => void;
   onDraftResultTextChange: (index: number, value: string) => void;
+  onDraftSystemPromptBodyChange: (index: number, value: string) => void;
+  onDraftSystemPromptNameChange: (index: number, value: string) => void;
   onDraftUserPromptChange: (value: string) => void;
-  onImagePaste: (event: ReactClipboardEvent<HTMLButtonElement>) => void;
   onImageUpload: (event: ChangeEvent<HTMLInputElement>) => void;
   onModelChange: (value: string[]) => void;
   onPasteTargetActiveChange: (active: boolean) => void;
   onRemoveDraftImage: (imageId: string) => void;
   onRemoveDraftResultText: (index: number) => void;
+  onRemoveDraftSystemPrompt: (index: number) => void;
   onResetDraftResultTexts: () => void;
+  onResetDraftSystemPrompts: () => void;
 };
 
 function ResultMediaPreview({
@@ -80,40 +84,52 @@ function ResultMediaPreview({
 }
 
 export function WritePanel({
-  draftBody,
   draftImages,
   draftLabel,
   draftNotes,
   draftResultTexts,
+  draftSystemPrompts,
   draftUserPrompt,
   audioGroupId,
   isVersionEdit = false,
   isVersionView = false,
   modelOptions,
   pasteTargetActive,
-  previousBody,
   previousUserPrompt,
   selectedModelIds,
   selectedTopicKind,
   ui,
-  onDraftBodyChange,
+  onAddDraftSystemPrompt,
   onDraftLabelChange,
   onDraftNotesChange,
   onAddDraftResultText,
   onDraftResultTextChange,
+  onDraftSystemPromptBodyChange,
+  onDraftSystemPromptNameChange,
   onDraftUserPromptChange,
-  onImagePaste,
   onImageUpload,
   onModelChange,
   onPasteTargetActiveChange,
   onRemoveDraftImage,
   onRemoveDraftResultText,
+  onRemoveDraftSystemPrompt,
   onResetDraftResultTexts,
+  onResetDraftSystemPrompts,
 }: WritePanelProps) {
   const imageUploadInputRef = useRef<HTMLInputElement>(null);
-  const promptTextareaRef = useRef<HTMLTextAreaElement>(null);
   const resultTextareaRefs = useRef<Array<HTMLTextAreaElement | null>>([]);
+  const systemPromptTabRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const systemPromptTabNameInputRef = useRef<HTMLInputElement | null>(null);
+  const systemPromptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const previousSystemPromptCountRef = useRef(draftSystemPrompts.length);
   const userPromptTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const [activeSystemPromptIndex, setActiveSystemPromptIndex] = useState(0);
+  const [editingSystemPromptIndex, setEditingSystemPromptIndex] = useState<
+    number | null
+  >(null);
+  const [editingSystemPromptTabWidth, setEditingSystemPromptTabWidth] = useState<
+    number | null
+  >(null);
   const isPromptLocked = isVersionEdit || isVersionView;
   const isFullyReadOnly = isVersionView;
   const panelTitle = isVersionEdit
@@ -130,6 +146,45 @@ export function WritePanel({
     (total, text) => total + text.length,
     0,
   );
+  const systemPromptCharCount = getSystemPromptText(draftSystemPrompts).length;
+  const normalizedActiveSystemPromptIndex = Math.min(
+    activeSystemPromptIndex,
+    Math.max(0, draftSystemPrompts.length - 1),
+  );
+  const activeSystemPrompt =
+    draftSystemPrompts[normalizedActiveSystemPromptIndex] ?? null;
+  const systemPromptNameCounts = useMemo(
+    () =>
+      draftSystemPrompts.reduce<Record<string, number>>((counts, prompt, index) => {
+        const name = prompt.name.trim() || ui.systemPromptNamePlaceholder(index + 1);
+
+        counts[name] = (counts[name] ?? 0) + 1;
+        return counts;
+      }, {}),
+    [draftSystemPrompts, ui],
+  );
+  const getSystemPromptTabLabel = (prompt: SystemPrompt, index: number) => {
+    const name = prompt.name.trim() || ui.systemPromptNamePlaceholder(index + 1);
+
+    if ((systemPromptNameCounts[name] ?? 0) <= 1) {
+      return name;
+    }
+
+    const duplicateIndex =
+      draftSystemPrompts
+        .slice(0, index + 1)
+        .filter(
+          (item, itemIndex) =>
+            (item.name.trim() ||
+              ui.systemPromptNamePlaceholder(itemIndex + 1)) === name,
+        ).length;
+
+    return `${name} #${duplicateIndex}`;
+  };
+  const stopEditingSystemPromptName = () => {
+    setEditingSystemPromptIndex(null);
+    setEditingSystemPromptTabWidth(null);
+  };
   const editableResultTexts =
     draftResultTexts.length > 0 ? draftResultTexts : [""];
   const fileResultAccept =
@@ -149,13 +204,47 @@ export function WritePanel({
         ? Video
         : ImagePlus;
 
+  useEffect(() => {
+    const previousCount = previousSystemPromptCountRef.current;
+
+    if (draftSystemPrompts.length > previousCount) {
+      setActiveSystemPromptIndex(draftSystemPrompts.length - 1);
+    } else if (activeSystemPromptIndex >= draftSystemPrompts.length) {
+      setActiveSystemPromptIndex(Math.max(0, draftSystemPrompts.length - 1));
+    }
+
+    previousSystemPromptCountRef.current = draftSystemPrompts.length;
+  }, [activeSystemPromptIndex, draftSystemPrompts.length]);
+
+  useEffect(() => {
+    systemPromptTabRefs.current[normalizedActiveSystemPromptIndex]?.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+      inline: "nearest",
+    });
+  }, [draftSystemPrompts.length, normalizedActiveSystemPromptIndex]);
+
+  useEffect(() => {
+    if (editingSystemPromptIndex === null) {
+      return;
+    }
+
+    if (editingSystemPromptIndex >= draftSystemPrompts.length) {
+      stopEditingSystemPromptName();
+      return;
+    }
+
+    systemPromptTabNameInputRef.current?.focus();
+    systemPromptTabNameInputRef.current?.select();
+  }, [draftSystemPrompts.length, editingSystemPromptIndex]);
+
   return (
     <section className="panel editor-panel">
       <div className="panel-heading">
         <h3>{panelTitle}</h3>
         <span>
           {ui.promptChars(
-            (draftBody.length + draftUserPrompt.length).toLocaleString(),
+            (systemPromptCharCount + draftUserPrompt.length).toLocaleString(),
             selectedTopicKind === "text"
               ? resultTextCharCount.toLocaleString()
               : undefined,
@@ -184,16 +273,39 @@ export function WritePanel({
           placeholder={ui.versionNamePlaceholder}
         />
       </label>
-      <div className={`editor-field ${isPromptLocked ? "locked" : ""}`}>
+      <div className={`editor-field system-prompt-field ${isPromptLocked ? "locked" : ""}`}>
         <div className="field-title-row">
           <span>{ui.systemPrompt}</span>
           <div className="field-actions">
+            {!isPromptLocked && draftSystemPrompts.length > 1 ? (
+              <button
+                type="button"
+                className="field-action-button danger"
+                onClick={() =>
+                  onRemoveDraftSystemPrompt(normalizedActiveSystemPromptIndex)
+                }
+                aria-label={ui.deleteSystemPromptAria(
+                  activeSystemPrompt?.name.trim() ||
+                    ui.systemPromptIndex(normalizedActiveSystemPromptIndex + 1),
+                )}
+                title={ui.deleteSystemPromptAria(
+                  activeSystemPrompt?.name.trim() ||
+                    ui.systemPromptIndex(normalizedActiveSystemPromptIndex + 1),
+                )}
+              >
+                <Trash2 aria-hidden="true" size={14} />
+              </button>
+            ) : null}
             <button
               type="button"
               className="field-action-button"
-              onClick={() => selectTextarea(promptTextareaRef.current)}
-              aria-label={ui.selectPromptAria}
-              title={ui.selectPromptAria}
+              onClick={() => selectTextarea(systemPromptTextareaRef.current)}
+              aria-label={ui.selectSystemPromptItemAria(
+                normalizedActiveSystemPromptIndex + 1,
+              )}
+              title={ui.selectSystemPromptItemAria(
+                normalizedActiveSystemPromptIndex + 1,
+              )}
             >
               <TextSelect aria-hidden="true" size={14} />
               <span>{ui.selectAll}</span>
@@ -202,23 +314,111 @@ export function WritePanel({
               type="button"
               className="field-action-button"
               disabled={isPromptLocked}
-              onClick={() => onDraftBodyChange(previousBody)}
-              aria-label={ui.resetPromptAria}
-              title={ui.resetPromptAria}
+              onClick={onAddDraftSystemPrompt}
+              aria-label={ui.addSystemPrompt}
+              title={ui.addSystemPrompt}
+            >
+              <Plus aria-hidden="true" size={14} />
+              <span>{ui.add}</span>
+            </button>
+            <button
+              type="button"
+              className="field-action-button"
+              disabled={isPromptLocked}
+              onClick={onResetDraftSystemPrompts}
+              aria-label={ui.resetSystemPromptsAria}
+              title={ui.resetSystemPromptsAria}
             >
               <Undo2 aria-hidden="true" size={14} />
               <span>{ui.reset}</span>
             </button>
           </div>
         </div>
-        <textarea
-          ref={promptTextareaRef}
-          value={draftBody}
-          readOnly={isPromptLocked}
-          onChange={(event) => onDraftBodyChange(event.target.value)}
-          placeholder={ui.promptPlaceholder}
-          aria-label={ui.systemPrompt}
-        />
+        <div className="system-prompt-tab-shell">
+          <div className="system-prompt-tabs" role="tablist" aria-label={ui.systemPrompt}>
+            {draftSystemPrompts.map((systemPrompt, index) => {
+              const tabLabel = getSystemPromptTabLabel(systemPrompt, index);
+              const isActive = index === normalizedActiveSystemPromptIndex;
+              const isEditing = index === editingSystemPromptIndex;
+
+              return (
+                <div
+                  ref={(element) => {
+                    systemPromptTabRefs.current[index] = element;
+                  }}
+                  className={`system-prompt-tab ${isActive ? "active" : ""}`}
+                  key={systemPrompt.id}
+                >
+                  {isEditing ? (
+                    <input
+                      ref={systemPromptTabNameInputRef}
+                      className="system-prompt-tab-input"
+                      style={{
+                        width: editingSystemPromptTabWidth
+                          ? `${editingSystemPromptTabWidth}px`
+                          : undefined,
+                      }}
+                      value={systemPrompt.name}
+                      onBlur={stopEditingSystemPromptName}
+                      onChange={(event) =>
+                        onDraftSystemPromptNameChange(index, event.target.value)
+                      }
+                      onClick={(event) => event.stopPropagation()}
+                      onDoubleClick={(event) => event.stopPropagation()}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === "Escape") {
+                          event.currentTarget.blur();
+                        }
+                      }}
+                      placeholder={ui.systemPromptNamePlaceholder(index + 1)}
+                      aria-label={ui.systemPromptNameAria(index + 1)}
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      className="system-prompt-tab-button"
+                      role="tab"
+                      aria-selected={isActive}
+                      onClick={() => setActiveSystemPromptIndex(index)}
+                      onDoubleClick={() => {
+                        if (!isPromptLocked) {
+                          setActiveSystemPromptIndex(index);
+                          setEditingSystemPromptTabWidth(
+                            systemPromptTabRefs.current[index]?.offsetWidth ??
+                              null,
+                          );
+                          setEditingSystemPromptIndex(index);
+                        }
+                      }}
+                      title={tabLabel}
+                    >
+                      {tabLabel}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {activeSystemPrompt ? (
+            <div className="system-prompt-item" role="tabpanel">
+              <textarea
+                ref={systemPromptTextareaRef}
+                value={activeSystemPrompt.body}
+                readOnly={isPromptLocked}
+                onChange={(event) =>
+                  onDraftSystemPromptBodyChange(
+                    normalizedActiveSystemPromptIndex,
+                    event.target.value,
+                  )
+                }
+                placeholder={ui.systemPrompt}
+                aria-label={ui.systemPromptIndex(
+                  normalizedActiveSystemPromptIndex + 1,
+                )}
+              />
+            </div>
+          ) : null}
+        </div>
       </div>
       <div className={`editor-field user-prompt-field ${isPromptLocked ? "locked" : ""}`}>
         <div className="field-title-row">
@@ -367,11 +567,6 @@ export function WritePanel({
             onBlur={() => onPasteTargetActiveChange(false)}
             onMouseEnter={() => onPasteTargetActiveChange(true)}
             onMouseLeave={() => onPasteTargetActiveChange(false)}
-            onPaste={
-              isFullyReadOnly || selectedTopicKind !== "image"
-                ? undefined
-                : onImagePaste
-            }
           >
             <ResultFileIcon aria-hidden="true" size={18} />
             <span>

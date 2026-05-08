@@ -11,6 +11,12 @@ import type {
 import { ImageDiffPreview, SplitDiffFiles } from "./DiffViews";
 import { StarToggleButton } from "./StarToggleButton";
 
+type PromptDiffBlock = {
+  key: string;
+  label: string;
+  rows: LineDiffRow[];
+};
+
 type DiffPanelProps = {
   addedCount: number;
   canCompareNext: boolean;
@@ -27,7 +33,7 @@ type DiffPanelProps = {
   removedCount: number;
   resultTextDiffRows: LineDiffRow[];
   showCompareControls: boolean;
-  systemPromptDiffRows: LineDiffRow[];
+  systemPromptDiffBlocks: PromptDiffBlock[];
   targetResultDiffCount: number;
   targetResultDiffIndex: number;
   ui: UiMessages;
@@ -54,7 +60,7 @@ export function DiffPanel({
   removedCount,
   resultTextDiffRows,
   showCompareControls,
-  systemPromptDiffRows,
+  systemPromptDiffBlocks,
   targetResultDiffCount,
   targetResultDiffIndex,
   ui,
@@ -193,8 +199,12 @@ export function DiffPanel({
       <span>{ui.result}</span>
     </div>
   );
-  const renderPromptDiffBlock = (label: string, rows: LineDiffRow[]) => (
-    <div className="prompt-diff-block">
+  const renderPromptDiffBlock = (
+    label: string,
+    rows: LineDiffRow[],
+    key?: string,
+  ) => (
+    <div className="prompt-diff-block" key={key}>
       <div className="prompt-diff-label">
         <span>{label}</span>
       </div>
@@ -254,7 +264,13 @@ export function DiffPanel({
           <div className="diff-version-header-cell">{targetTitle}</div>
         </div>
         <div className="prompt-diff-section">
-          {renderPromptDiffBlock(ui.systemPrompt, systemPromptDiffRows)}
+          {systemPromptDiffBlocks.map((block) =>
+            renderPromptDiffBlock(
+              `${ui.systemPrompt} · ${block.label}`,
+              block.rows,
+              block.key,
+            ),
+          )}
           {renderPromptDiffBlock(ui.userPrompt, userPromptDiffRows)}
         </div>
         {compareTargetKind === "text" ? (

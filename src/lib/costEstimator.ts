@@ -13,6 +13,7 @@ import {
   getVersionKind,
   getVersionResultText,
   getVersionResultTexts,
+  getVersionSystemPromptText,
   getVersionUserPrompt,
 } from "./promptVersions";
 
@@ -303,8 +304,10 @@ export const estimateTextTokens = (text: string) => {
   return Math.max(1, Math.ceil(weightedCharacters));
 };
 
-const estimatePromptInputStats = (version: Pick<PromptVersion, "body" | "userPrompt">) => {
-  const systemPrompt = version.body;
+const estimatePromptInputStats = (
+  version: Pick<PromptVersion, "body" | "systemPrompts" | "userPrompt">,
+) => {
+  const systemPrompt = getVersionSystemPromptText(version);
   const userPrompt = getVersionUserPrompt(version);
 
   return {
@@ -367,7 +370,16 @@ const formatKrwAmount = (value: number) =>
   });
 
 const formatKrwAxisAmount = (value: number) =>
-  Math.round(value).toLocaleString("ko-KR");
+  value.toLocaleString("ko-KR", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+
+const formatUsdAxisAmount = (value: number) =>
+  value.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 
 export const formatUsd = (value: number) => {
   if (value === 0) {
@@ -410,7 +422,7 @@ export const formatCurrencyAxis = (
     return `${valueKrw < 0 ? "-" : ""}₩${formatKrwAxisAmount(Math.abs(valueKrw))}`;
   }
 
-  return `${valueUsd < 0 ? "-" : ""}$${Math.round(Math.abs(valueUsd)).toLocaleString("en-US")}`;
+  return `${valueUsd < 0 ? "-" : ""}$${formatUsdAxisAmount(Math.abs(valueUsd))}`;
 };
 
 export const formatSignedNumber = (value: number) =>

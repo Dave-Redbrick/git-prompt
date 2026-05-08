@@ -5,8 +5,11 @@ import type {
   PromptVersion,
   PromptVersionKind,
   ResultMediaKind,
+  SystemPrompt,
   Topic,
 } from "../types";
+
+export const defaultSystemPromptName = "default";
 
 export const getVersionKind = (
   version?: PromptVersion | null,
@@ -21,6 +24,82 @@ export const normalizeResultTexts = (texts: string[]) =>
   texts.map((text) => text.trim()).filter(Boolean);
 
 export const joinResultTexts = (texts: string[]) => texts.join("\n\n");
+
+const systemPromptFallbackName = (index: number) =>
+  index === 0 ? defaultSystemPromptName : `system-${index + 1}`;
+
+const normalizeSystemPrompt = (
+  prompt: Partial<SystemPrompt>,
+  index: number,
+): SystemPrompt => ({
+  id: prompt.id?.trim() || `system-prompt-${index + 1}`,
+  name: prompt.name?.trim() || systemPromptFallbackName(index),
+  body: prompt.body ?? "",
+});
+
+export const normalizeSystemPrompts = (
+  systemPrompts?: Partial<SystemPrompt>[],
+  legacyBody = "",
+) => {
+  const source =
+    Array.isArray(systemPrompts) && systemPrompts.length > 0
+      ? systemPrompts
+      : [{ body: legacyBody, name: defaultSystemPromptName }];
+
+  return source.map((prompt, index) => normalizeSystemPrompt(prompt, index));
+};
+
+export const getVersionSystemPrompts = (
+  version?: Pick<PromptVersion, "body" | "systemPrompts"> | null,
+) => normalizeSystemPrompts(version?.systemPrompts, version?.body ?? "");
+
+export const copySystemPromptsToDraft = (
+  source?: Pick<PromptVersion, "body" | "systemPrompts"> | null,
+) =>
+  getVersionSystemPrompts(source).map((prompt) => ({
+    ...prompt,
+    id: createId(),
+  }));
+
+export const createSystemPrompt = (
+  body = "",
+  name = defaultSystemPromptName,
+): SystemPrompt => ({
+  id: createId(),
+  name,
+  body,
+});
+
+export const getSystemPromptText = (
+  systemPrompts: Array<Pick<SystemPrompt, "body">>,
+) =>
+  systemPrompts
+    .map((prompt) => prompt.body)
+    .filter((body) => body.trim().length > 0)
+    .join("\n\n");
+
+export const getVersionSystemPromptText = (
+  version?: Pick<PromptVersion, "body" | "systemPrompts"> | null,
+) => getSystemPromptText(getVersionSystemPrompts(version));
+
+export const systemPromptListsMatch = (
+  left: Array<Partial<SystemPrompt>>,
+  right: Array<Partial<SystemPrompt>>,
+) => {
+  const leftPrompts = normalizeSystemPrompts(left);
+  const rightPrompts = normalizeSystemPrompts(right);
+
+  return (
+    leftPrompts.length === rightPrompts.length &&
+    leftPrompts.every((prompt, index) => {
+      const rightPrompt = rightPrompts[index];
+
+      return (
+        prompt.name === rightPrompt?.name && prompt.body === rightPrompt?.body
+      );
+    })
+  );
+};
 
 export const getVersionResultTexts = (version?: PromptVersion | null) => {
   if (!version || getVersionKind(version) !== "text") {
@@ -46,11 +125,19 @@ export const getVersionUserPrompt = (
 
 export const getCombinedPromptText = ({
   body,
+  systemPrompts,
   userPrompt,
 }: {
-  body: string;
+  body?: string;
+  systemPrompts?: Array<Pick<SystemPrompt, "body">>;
   userPrompt?: string;
-}) => [body, userPrompt ?? ""].filter((part) => part.trim().length > 0).join("\n\n");
+}) =>
+  [
+    systemPrompts ? getSystemPromptText(systemPrompts) : (body ?? ""),
+    userPrompt ?? "",
+  ]
+    .filter((part) => part.trim().length > 0)
+    .join("\n\n");
 
 export const getCommitMemo = (notes: string | undefined, fallback: string) =>
   notes?.trim() || fallback;

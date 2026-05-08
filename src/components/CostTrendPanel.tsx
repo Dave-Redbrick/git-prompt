@@ -326,7 +326,7 @@ export function CostTrendPanel({
                       domain={costChartDomain}
                       tickLine={false}
                       axisLine={false}
-                      width={72}
+                      width={86}
                       tickFormatter={(value) => formatAxisCost(Number(value))}
                     />
                     <Tooltip

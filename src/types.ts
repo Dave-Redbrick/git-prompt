@@ -82,6 +82,12 @@ export type Topic = {
   updatedAt: string;
 };
 
+export type SystemPrompt = {
+  id: string;
+  name: string;
+  body: string;
+};
+
 export type PromptVersion = {
   id: string;
   topicId: string;
@@ -91,6 +97,7 @@ export type PromptVersion = {
   isGoodResult?: boolean;
   label: string;
   body: string;
+  systemPrompts?: SystemPrompt[];
   userPrompt?: string;
   resultText?: string;
   resultTexts?: string[];
@@ -103,6 +110,7 @@ export type PromptDraft = {
   kind?: PromptVersionKind;
   label: string;
   body: string;
+  systemPrompts?: SystemPrompt[];
   userPrompt?: string;
   resultTexts?: string[];
   notes: string;

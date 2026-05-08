@@ -173,6 +173,13 @@ export const seedIfEmpty = async () => {
     kind: "text",
     label: "초안",
     body: "우리 제품을 소개하는 랜딩 페이지 히어로 카피를 작성해줘.",
+    systemPrompts: [
+      {
+        id: createId(),
+        name: "default",
+        body: "우리 제품을 소개하는 랜딩 페이지 히어로 카피를 작성해줘.",
+      },
+    ],
     resultText: "제품의 핵심 가치를 한 문장으로 드러내는 히어로 카피 초안",
     notes: "비교용 샘플 초안",
     createdAt,
