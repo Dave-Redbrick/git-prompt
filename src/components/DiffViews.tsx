@@ -28,8 +28,16 @@ type DiffOverviewMarker = {
 
 type DiffOverviewMarkerLayout = Record<string, { top: number; height: number }>;
 
+type RenderedDiffOverviewMarker = {
+  height: number;
+  id: string;
+  top: number;
+  type: DiffOverviewMarkerType;
+};
+
 const MIN_OVERVIEW_MARKER_HEIGHT = 3;
 const FALLBACK_DIFF_ROW_HEIGHT = 24;
+const OVERVIEW_MARKER_BLEND_GAP = 2;
 
 const getOverviewMarkerType = (
   types: DiffOverviewMarkerType[],
@@ -84,16 +92,59 @@ const getFallbackOverviewMarkerLayout = (marker: DiffOverviewMarker) => ({
 });
 
 const getOverviewMarkerStyle = (
-  marker: DiffOverviewMarker,
+  marker: RenderedDiffOverviewMarker,
+) => {
+  return {
+    height: `${marker.height}px`,
+    top: `${marker.top}px`,
+  };
+};
+
+const getRenderedOverviewMarkers = (
+  markers: DiffOverviewMarker[],
   layout: DiffOverviewMarkerLayout,
 ) => {
-  const markerLayout =
-    layout[marker.id] ?? getFallbackOverviewMarkerLayout(marker);
+  const positionedMarkers = markers
+    .map((marker) => {
+      const markerLayout =
+        layout[marker.id] ?? getFallbackOverviewMarkerLayout(marker);
 
-  return {
-    height: `${markerLayout.height}px`,
-    top: `${markerLayout.top}px`,
-  };
+      return {
+        height: markerLayout.height,
+        id: marker.id,
+        top: markerLayout.top,
+        type: marker.type,
+      };
+    })
+    .sort((left, right) => left.top - right.top);
+
+  return positionedMarkers.reduce<RenderedDiffOverviewMarker[]>(
+    (mergedMarkers, marker) => {
+      const previousMarker = mergedMarkers[mergedMarkers.length - 1];
+
+      if (!previousMarker) {
+        return [marker];
+      }
+
+      const previousBottom = previousMarker.top + previousMarker.height;
+
+      if (marker.top > previousBottom + OVERVIEW_MARKER_BLEND_GAP) {
+        return [...mergedMarkers, marker];
+      }
+
+      const nextBottom = Math.max(previousBottom, marker.top + marker.height);
+      const nextMarker: RenderedDiffOverviewMarker = {
+        height: nextBottom - previousMarker.top,
+        id: `${previousMarker.id}:${marker.id}`,
+        top: previousMarker.top,
+        type:
+          previousMarker.type === marker.type ? previousMarker.type : "changed",
+      };
+
+      return [...mergedMarkers.slice(0, -1), nextMarker];
+    },
+    [],
+  );
 };
 
 const getDiffCell = (row: LineDiffRow, side: DiffSide) => {
@@ -145,6 +196,10 @@ export function SplitDiffFiles({
   const overviewMarkers = useMemo(() => getOverviewMarkers(rows), [rows]);
   const [overviewMarkerLayout, setOverviewMarkerLayout] =
     useState<DiffOverviewMarkerLayout>({});
+  const renderedOverviewMarkers = useMemo(
+    () => getRenderedOverviewMarkers(overviewMarkers, overviewMarkerLayout),
+    [overviewMarkerLayout, overviewMarkers],
+  );
 
   const updateOverviewMarkerLayout = useCallback(() => {
     const codeLinesElement = codeLinesRef.current;
@@ -288,17 +343,17 @@ export function SplitDiffFiles({
           </div>
         )}
       </div>
-      {overviewMarkers.length > 0 ? (
+      {renderedOverviewMarkers.length > 0 ? (
         <div
           className="diff-scroll-preview"
           aria-hidden="true"
           ref={overviewRef}
         >
-          {overviewMarkers.map((marker) => (
+          {renderedOverviewMarkers.map((marker) => (
             <span
               className={`diff-scroll-preview-marker ${marker.type}`}
               key={marker.id}
-              style={getOverviewMarkerStyle(marker, overviewMarkerLayout)}
+              style={getOverviewMarkerStyle(marker)}
             />
           ))}
         </div>

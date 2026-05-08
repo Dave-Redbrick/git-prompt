@@ -2524,16 +2524,16 @@ textarea::placeholder {
 
 .diff-scroll-preview {
   position: absolute;
-  top: 40px;
+  top: 34px;
   right: 4px;
-  bottom: 6px;
+  bottom: 0;
   z-index: 3;
   width: 6px;
   pointer-events: none;
 }
 
 .split-diff.without-file-headers .diff-scroll-preview {
-  top: 6px;
+  top: 0;
 }
 
 .diff-scroll-preview-marker {
@@ -2541,20 +2541,22 @@ textarea::placeholder {
   right: 0;
   left: 0;
   min-height: 3px;
-  border-radius: 999px;
-  opacity: 0.86;
 }
 
 .diff-scroll-preview-marker.added {
-  background: #1f8f4d;
+  background: rgba(31, 143, 77, 0.46);
 }
 
 .diff-scroll-preview-marker.removed {
-  background: #d14b4b;
+  background: rgba(209, 75, 75, 0.46);
 }
 
 .diff-scroll-preview-marker.changed {
-  background: linear-gradient(90deg, #d14b4b 0 50%, #1f8f4d 50% 100%);
+  background: linear-gradient(
+    90deg,
+    rgba(209, 75, 75, 0.46) 0 50%,
+    rgba(31, 143, 77, 0.46) 50% 100%
+  );
 }
 
 .split-diff.without-file-headers {
