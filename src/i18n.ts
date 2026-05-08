@@ -255,7 +255,7 @@ export const messages = {
     systemPromptNameAria: (index: number) =>
       `시스템 프롬프트 ${index} 탭 이름`,
     systemPromptNamePlaceholder: (index: number) =>
-      index === 1 ? "default" : `system-${index}`,
+      index === 1 ? "디폴트" : `프롬프트 ${index}`,
     switchToDarkAria: "다크 테마로 전환",
     switchToDarkTitle: "다크 테마",
     switchToLightAria: "라이트 테마로 전환",
@@ -540,7 +540,7 @@ export const messages = {
     systemPromptNameAria: (index: number) =>
       `System prompt ${index} tab name`,
     systemPromptNamePlaceholder: (index: number) =>
-      index === 1 ? "default" : `system-${index}`,
+      index === 1 ? "default" : `prompt ${index}`,
     switchToDarkAria: "Switch to dark theme",
     switchToDarkTitle: "Dark theme",
     switchToLightAria: "Switch to light theme",

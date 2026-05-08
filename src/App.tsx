@@ -671,6 +671,11 @@ export function App() {
   const [appearanceTheme, setAppearanceTheme] =
     useState<AppearanceTheme>(readAppearanceTheme);
   const [locale, setLocale] = useState<Locale>(readLocale);
+  const ui = messages[locale];
+
+  const createDraftSystemPrompt = (body = "", index = 1) =>
+    createSystemPrompt(body, ui.systemPromptNamePlaceholder(index));
+
   const [store, setStore] = useState<StoreState>(emptyStoreState);
   const [selectedProjectId, setSelectedProjectId] = useState(
     savedSelection.projectId,
@@ -730,7 +735,7 @@ export function App() {
   const [draftLabel, setDraftLabel] = useState("");
   const [draftBody, setDraftBody] = useState("");
   const [draftSystemPrompts, setDraftSystemPrompts] = useState<SystemPrompt[]>(
-    () => [createSystemPrompt()],
+    () => [createDraftSystemPrompt()],
   );
   const [draftUserPrompt, setDraftUserPrompt] = useState("");
   const [draftResultTexts, setDraftResultTexts] = useState<string[]>([""]);
@@ -744,7 +749,6 @@ export function App() {
   const [draftRedoStack, setDraftRedoStack] = useState<DraftHistorySnapshot[]>(
     [],
   );
-  const ui = messages[locale];
   const usdKrwExchangeRate = useUsdKrwExchangeRate(locale === "ko");
 
   const showToast = (message: string, variant: ToastVariant = "success") => {
@@ -971,7 +975,7 @@ export function App() {
 
   function syncDraftSystemPrompts(systemPrompts: SystemPrompt[]) {
     const nextSystemPrompts =
-      systemPrompts.length > 0 ? systemPrompts : [createSystemPrompt()];
+      systemPrompts.length > 0 ? systemPrompts : [createDraftSystemPrompt()];
 
     setDraftSystemPrompts(nextSystemPrompts);
     setDraftBody(getSystemPromptText(nextSystemPrompts));
@@ -984,7 +988,7 @@ export function App() {
 
     const systemPrompts = latestVersion
       ? copySystemPromptsToDraft(latestVersion)
-      : [createSystemPrompt()];
+      : [createDraftSystemPrompt()];
 
     return {
       topicId: selectedTopicId,
@@ -1319,7 +1323,7 @@ export function App() {
       setDraftKind("text");
       setDraftLabel("");
       setDraftBody("");
-      setDraftSystemPrompts([createSystemPrompt()]);
+      setDraftSystemPrompts([createDraftSystemPrompt()]);
       setDraftUserPrompt("");
       setDraftResultTexts([""]);
       setDraftNotes("");
@@ -2282,7 +2286,7 @@ export function App() {
   const handleAddDraftSystemPrompt = () => {
     commitDraftSystemPrompts([
       ...draftSystemPrompts,
-      createSystemPrompt("", `system-${draftSystemPrompts.length + 1}`),
+      createDraftSystemPrompt("", draftSystemPrompts.length + 1),
     ]);
   };
 
@@ -2785,7 +2789,7 @@ export function App() {
       remainingVersions[remainingVersions.length - 1] ?? null;
     const fallbackSystemPrompts = remainingLatest
       ? copySystemPromptsToDraft(remainingLatest)
-      : [createSystemPrompt()];
+      : [createDraftSystemPrompt()];
     applyDraftState(
       selectedTopicDraft ?? {
         topicId: selectedTopicId,
