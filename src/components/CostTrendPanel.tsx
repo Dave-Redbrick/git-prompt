@@ -166,6 +166,26 @@ const emptyTopicUsage: TopicUsageSummary = {
   totalCostUsd: 0,
 };
 
+const getCostChartDomain = (costs: number[]): [number, number] => {
+  const validCosts = costs.filter((cost) => Number.isFinite(cost));
+  if (validCosts.length === 0) {
+    return [0, 1];
+  }
+
+  const minCost = Math.min(...validCosts);
+  const maxCost = Math.max(...validCosts);
+  const spread = maxCost - minCost;
+  if (spread > 0) {
+    const padding = spread * 0.25;
+
+    return [Math.max(0, minCost - padding), maxCost + padding];
+  }
+
+  const fallbackPadding = Math.max(Math.abs(minCost) * 0.05, 0.000001);
+
+  return [Math.max(0, minCost - fallbackPadding), minCost + fallbackPadding];
+};
+
 const addMetricsToTopicUsage = (
   summary: TopicUsageSummary,
   metrics: VersionCostMetrics,
@@ -238,6 +258,9 @@ export function CostTrendPanel({
     order: index + 1,
     tokens: metrics.inputTokens,
   }));
+  const costChartDomain = getCostChartDomain(
+    chartData.map((item) => item.cost),
+  );
 
   return (
     <section className="panel cost-panel">
@@ -300,6 +323,7 @@ export function CostTrendPanel({
                       tickMargin={8}
                     />
                     <YAxis
+                      domain={costChartDomain}
                       tickLine={false}
                       axisLine={false}
                       width={72}
