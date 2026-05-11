@@ -1,12 +1,16 @@
 import {
   ChangeEvent,
+  DragEvent,
+  Fragment,
   FormEvent,
+  startTransition,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 import {
   ChartNoAxesColumnIncreasing,
   ChevronDown,
@@ -145,6 +149,27 @@ type RenameTarget = {
   id: string;
   value: string;
 };
+type TreeDragTarget = {
+  kind: RenameTarget["kind"];
+  id: string;
+};
+type DropPreviewPosition = "before" | "after";
+type TreeDropPreview = TreeDragTarget & {
+  position: DropPreviewPosition;
+};
+type TreeDragOverlay = TreeDragTarget & {
+  height: number;
+  offsetX: number;
+  offsetY: number;
+  width: number;
+  x: number;
+  y: number;
+};
+
+type OrderedEntity = {
+  id: string;
+  order?: number;
+};
 
 type SystemPromptDiffBlock = {
   key: string;
@@ -162,6 +187,19 @@ type DraftHistorySnapshot = {
   userPrompt: string;
 };
 
+type OrderHistorySnapshotItem = {
+  id: string;
+  order: number;
+};
+
+type TreeOrderHistorySnapshot = {
+  projects: OrderHistorySnapshotItem[];
+  themes: OrderHistorySnapshotItem[];
+  topics: OrderHistorySnapshotItem[];
+};
+
+type HistoryActionKind = "draft" | "tree-order";
+
 type StoreState = {
   projects: Project[];
   themes: Theme[];
@@ -178,6 +216,110 @@ const emptyStoreState: StoreState = {
   versions: [],
   images: [],
   drafts: [],
+};
+
+const compareCreatedAtAsc = <T extends { createdAt: string }>(left: T, right: T) =>
+  left.createdAt.localeCompare(right.createdAt);
+
+const compareUpdatedAtDesc = <T extends { updatedAt: string }>(left: T, right: T) =>
+  right.updatedAt.localeCompare(left.updatedAt);
+
+const getOrderedValue = (item: OrderedEntity, fallbackIndex: number) =>
+  Number.isFinite(item.order) ? item.order ?? fallbackIndex : fallbackIndex;
+
+const sortByDisplayOrder = <T extends OrderedEntity>(
+  items: T[],
+  fallbackCompare: (left: T, right: T) => number,
+) => {
+  const fallbackSortedItems = [...items].sort(fallbackCompare);
+  const fallbackIndexById = new Map(
+    fallbackSortedItems.map((item, index) => [item.id, index]),
+  );
+
+  return [...items].sort((left, right) => {
+    const leftIndex = fallbackIndexById.get(left.id) ?? 0;
+    const rightIndex = fallbackIndexById.get(right.id) ?? 0;
+    const orderDelta =
+      getOrderedValue(left, leftIndex) - getOrderedValue(right, rightIndex);
+
+    return orderDelta || leftIndex - rightIndex;
+  });
+};
+
+const sortProjectsByDisplayOrder = (projects: Project[]) =>
+  sortByDisplayOrder(projects, compareCreatedAtAsc);
+
+const sortThemesByDisplayOrder = (themes: Theme[]) =>
+  sortByDisplayOrder(themes, compareCreatedAtAsc);
+
+const sortTopicsByDisplayOrder = (topics: Topic[]) =>
+  sortByDisplayOrder(topics, compareUpdatedAtDesc);
+
+const getNextOrder = (items: OrderedEntity[]) =>
+  items.reduce(
+    (nextOrder, item, index) =>
+      Math.max(nextOrder, getOrderedValue(item, index) + 1),
+    0,
+  );
+
+const applySequentialOrder = <T extends OrderedEntity>(items: T[]) =>
+  items.map((item, index) => ({ ...item, order: index }));
+
+const moveItemById = <T extends OrderedEntity>(
+  items: T[],
+  draggedId: string,
+  targetId: string,
+  insertAfter: boolean,
+) => {
+  if (draggedId === targetId) {
+    return items;
+  }
+
+  const draggedIndex = items.findIndex((item) => item.id === draggedId);
+  const targetIndex = items.findIndex((item) => item.id === targetId);
+
+  if (draggedIndex < 0 || targetIndex < 0) {
+    return items;
+  }
+
+  const nextItems = [...items];
+  const [draggedItem] = nextItems.splice(draggedIndex, 1);
+  const targetIndexAfterRemoval = nextItems.findIndex(
+    (item) => item.id === targetId,
+  );
+  const insertionIndex = targetIndexAfterRemoval + (insertAfter ? 1 : 0);
+
+  nextItems.splice(insertionIndex, 0, draggedItem);
+  return nextItems;
+};
+
+const moveItemByIndex = <T,>(
+  items: T[],
+  draggedIndex: number,
+  targetIndex: number,
+  insertAfter: boolean,
+) => {
+  if (draggedIndex === targetIndex) {
+    return items;
+  }
+
+  const nextItems = [...items];
+  const [draggedItem] = nextItems.splice(draggedIndex, 1);
+  const targetIndexAfterRemoval =
+    draggedIndex < targetIndex ? targetIndex - 1 : targetIndex;
+  const insertionIndex = targetIndexAfterRemoval + (insertAfter ? 1 : 0);
+
+  nextItems.splice(insertionIndex, 0, draggedItem);
+  return nextItems;
+};
+
+const isDropAfterTarget = (
+  event: DragEvent<HTMLElement>,
+  anchorY = event.clientY,
+) => {
+  const rect = event.currentTarget.getBoundingClientRect();
+
+  return anchorY > rect.top + rect.height / 2;
 };
 
 const readSelection = (): Selection => {
@@ -581,6 +723,7 @@ const draftImagesEqual = (left: DraftImage[], right: DraftImage[]) =>
       image.sourceId === other?.sourceId &&
       image.kind === other?.kind &&
       image.name === other?.name &&
+      image.order === other?.order &&
       image.type === other?.type &&
       image.dataUrl === other?.dataUrl
     );
@@ -610,6 +753,25 @@ const draftHistorySnapshotsEqual = (
   left.resultTexts.every((text, index) => text === right.resultTexts[index]) &&
   systemPromptsEqual(left.systemPrompts, right.systemPrompts) &&
   draftImagesEqual(left.images, right.images);
+
+const orderHistoryItemsEqual = (
+  left: OrderHistorySnapshotItem[],
+  right: OrderHistorySnapshotItem[],
+) =>
+  left.length === right.length &&
+  left.every((item, index) => {
+    const other = right[index];
+
+    return item.id === other?.id && item.order === other?.order;
+  });
+
+const treeOrderHistorySnapshotsEqual = (
+  left: TreeOrderHistorySnapshot,
+  right: TreeOrderHistorySnapshot,
+) =>
+  orderHistoryItemsEqual(left.projects, right.projects) &&
+  orderHistoryItemsEqual(left.themes, right.themes) &&
+  orderHistoryItemsEqual(left.topics, right.topics);
 
 const getSystemPromptBuckets = (systemPrompts: SystemPrompt[]) =>
   systemPrompts.reduce<Map<string, SystemPrompt[]>>((buckets, prompt) => {
@@ -670,6 +832,8 @@ export function App() {
   const projectImportInputRef = useRef<HTMLInputElement>(null);
   const customModelImportInputRef = useRef<HTMLInputElement>(null);
   const customModelProviderPickerRef = useRef<HTMLDivElement>(null);
+  const treeDragActiveRef = useRef(false);
+  const suppressTreeSelectionUntilRef = useRef(0);
   const [folderState, setFolderState] = useState<FolderState>(readFolderState);
   const [appearanceTheme, setAppearanceTheme] =
     useState<AppearanceTheme>(readAppearanceTheme);
@@ -706,6 +870,16 @@ export function App() {
     "project" | "theme" | "topic" | null
   >(null);
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null);
+  const [draggedTreeTarget, setDraggedTreeTarget] =
+    useState<TreeDragTarget | null>(null);
+  const [treeDropPreview, setTreeDropPreview] =
+    useState<TreeDropPreview | null>(null);
+  const [treeDragOverlay, setTreeDragOverlay] =
+    useState<TreeDragOverlay | null>(null);
+  const [treeDragSourceHidden, setTreeDragSourceHidden] = useState(false);
+  const treeDragSourceHideFrameRef = useRef<number | null>(null);
+  const treeDragOverlayFrameRef = useRef<number | null>(null);
+  const treeDragOverlayPointRef = useRef<{ x: number; y: number } | null>(null);
   const [customModels, setCustomModels] =
     useState<TopicModelConfig[]>(readCustomModels);
   const [customModelKind, setCustomModelKind] =
@@ -752,6 +926,18 @@ export function App() {
   const [draftRedoStack, setDraftRedoStack] = useState<DraftHistorySnapshot[]>(
     [],
   );
+  const [treeOrderUndoStack, setTreeOrderUndoStack] = useState<
+    TreeOrderHistorySnapshot[]
+  >([]);
+  const [treeOrderRedoStack, setTreeOrderRedoStack] = useState<
+    TreeOrderHistorySnapshot[]
+  >([]);
+  const [historyUndoStack, setHistoryUndoStack] = useState<HistoryActionKind[]>(
+    [],
+  );
+  const [historyRedoStack, setHistoryRedoStack] = useState<HistoryActionKind[]>(
+    [],
+  );
   const usdKrwExchangeRate = useUsdKrwExchangeRate(locale === "ko");
 
   const showToast = (message: string, variant: ToastVariant = "success") => {
@@ -762,9 +948,16 @@ export function App() {
     setConfirmDialog(dialog);
   };
 
+  const pushHistoryUndoAction = (kind: HistoryActionKind) => {
+    setHistoryUndoStack((current) => [...current, kind].slice(-draftHistoryLimit));
+    setHistoryRedoStack([]);
+  };
+
   const clearDraftHistory = () => {
     setDraftUndoStack([]);
     setDraftRedoStack([]);
+    setHistoryUndoStack((current) => current.filter((kind) => kind !== "draft"));
+    setHistoryRedoStack((current) => current.filter((kind) => kind !== "draft"));
   };
 
   const selectCustomModelKind = (kind: TopicModelKind) => {
@@ -884,9 +1077,9 @@ export function App() {
     ]);
 
     setStore({
-      projects: projects.sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
-      themes: themes.sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
-      topics: topics.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+      projects: sortProjectsByDisplayOrder(projects),
+      themes: sortThemesByDisplayOrder(themes),
+      topics: sortTopicsByDisplayOrder(topics),
       versions: versions.sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
       images,
       drafts,
@@ -951,19 +1144,22 @@ export function App() {
     }
   }, [customModels]);
 
-  const selectedProject = store.projects.find(
+  const displayProjects = sortProjectsByDisplayOrder(store.projects);
+  const selectedProject = displayProjects.find(
     (project) => project.id === selectedProjectId,
   );
-  const projectThemes = store.themes.filter(
-    (theme) => theme.projectId === selectedProjectId,
+  const projectThemes = sortThemesByDisplayOrder(
+    store.themes.filter((theme) => theme.projectId === selectedProjectId),
   );
   const selectedTheme = projectThemes.find(
     (theme) => theme.id === selectedThemeId,
   );
-  const themeTopics = store.topics.filter(
-    (topic) =>
-      topic.projectId === selectedProjectId &&
-      topic.themeId === selectedThemeId,
+  const themeTopics = sortTopicsByDisplayOrder(
+    store.topics.filter(
+      (topic) =>
+        topic.projectId === selectedProjectId &&
+        topic.themeId === selectedThemeId,
+    ),
   );
   const selectedTopic = themeTopics.find(
     (topic) => topic.id === selectedTopicId,
@@ -1041,10 +1237,19 @@ export function App() {
   }
 
   const imagesByVersion = useMemo(() => {
-    return store.images.reduce<Record<string, ImageAsset[]>>((acc, image) => {
+    const groupedImages = store.images.reduce<Record<string, ImageAsset[]>>((acc, image) => {
       acc[image.versionId] = [...(acc[image.versionId] ?? []), image];
       return acc;
     }, {});
+
+    Object.keys(groupedImages).forEach((versionId) => {
+      groupedImages[versionId] = sortByDisplayOrder(
+        groupedImages[versionId],
+        compareCreatedAtAsc,
+      );
+    });
+
+    return groupedImages;
   }, [store.images]);
   const normalizedDraftResultTexts = useMemo(
     () => normalizeResultTexts(draftResultTexts),
@@ -1227,8 +1432,10 @@ export function App() {
     themeId: string,
     source: Pick<StoreState, "topics"> = store,
   ) => {
-    const topics = source.topics.filter(
-      (topic) => topic.projectId === projectId && topic.themeId === themeId,
+    const topics = sortTopicsByDisplayOrder(
+      source.topics.filter(
+        (topic) => topic.projectId === projectId && topic.themeId === themeId,
+      ),
     );
     const savedTopicId = folderState.themeTopicIds[themeId];
     return (
@@ -1242,8 +1449,8 @@ export function App() {
     projectId: string,
     source: Pick<StoreState, "themes" | "topics"> = store,
   ): Pick<Selection, "themeId" | "topicId"> => {
-    const themes = source.themes.filter(
-      (theme) => theme.projectId === projectId,
+    const themes = sortThemesByDisplayOrder(
+      source.themes.filter((theme) => theme.projectId === projectId),
     );
     const savedThemeId = folderState.projectThemeIds[projectId];
     const theme =
@@ -1259,18 +1466,46 @@ export function App() {
     };
   };
 
+  const shouldIgnoreTreeSelectionClick = () =>
+    treeDragActiveRef.current || Date.now() < suppressTreeSelectionUntilRef.current;
+
   const openProjectPath = (projectId: string) => {
+    if (shouldIgnoreTreeSelectionClick()) {
+      return;
+    }
+
     const { themeId, topicId } = getOpenPathForProject(projectId);
-    setSelectedProjectId(projectId);
-    setSelectedThemeId(themeId);
-    setSelectedTopicId(topicId);
-    setCreatePanel(null);
+    startTransition(() => {
+      setSelectedProjectId(projectId);
+      setSelectedThemeId(themeId);
+      setSelectedTopicId(topicId);
+      setCreatePanel(null);
+    });
   };
 
   const openThemePath = (themeId: string) => {
-    setSelectedThemeId(themeId);
-    setSelectedTopicId(getOpenTopicIdForTheme(selectedProjectId, themeId));
-    setCreatePanel(null);
+    if (shouldIgnoreTreeSelectionClick()) {
+      return;
+    }
+
+    const topicId = getOpenTopicIdForTheme(selectedProjectId, themeId);
+
+    startTransition(() => {
+      setSelectedThemeId(themeId);
+      setSelectedTopicId(topicId);
+      setCreatePanel(null);
+    });
+  };
+
+  const openTopicPath = (topicId: string) => {
+    if (shouldIgnoreTreeSelectionClick()) {
+      return;
+    }
+
+    startTransition(() => {
+      setSelectedTopicId(topicId);
+      setCreatePanel(null);
+    });
   };
 
   useEffect(() => {
@@ -1693,6 +1928,90 @@ export function App() {
     userPrompt: draftUserPrompt,
   });
 
+  const createScopedOrderSnapshot = <T extends OrderedEntity>(
+    items: T[],
+    getScopeKey: (item: T) => string,
+    sortItems: (scopedItems: T[]) => T[],
+  ): OrderHistorySnapshotItem[] => {
+    const groups = new Map<string, T[]>();
+
+    items.forEach((item) => {
+      const scopeKey = getScopeKey(item);
+      groups.set(scopeKey, [...(groups.get(scopeKey) ?? []), item]);
+    });
+
+    return Array.from(groups.values()).flatMap((group) =>
+      sortItems(group).map((item, index) => ({ id: item.id, order: index })),
+    );
+  };
+
+  const createTreeOrderHistorySnapshot = (): TreeOrderHistorySnapshot => ({
+    projects: sortProjectsByDisplayOrder(store.projects).map((project, index) => ({
+      id: project.id,
+      order: index,
+    })),
+    themes: createScopedOrderSnapshot(
+      store.themes,
+      (theme) => theme.projectId,
+      sortThemesByDisplayOrder,
+    ),
+    topics: createScopedOrderSnapshot(
+      store.topics,
+      (topic) => `${topic.projectId}:${topic.themeId ?? ""}`,
+      sortTopicsByDisplayOrder,
+    ),
+  });
+
+  const applyOrderSnapshotItems = <T extends OrderedEntity>(
+    items: T[],
+    snapshotItems: OrderHistorySnapshotItem[],
+    sortItems: (nextItems: T[]) => T[],
+  ) => {
+    const orderById = new Map(
+      snapshotItems.map((item) => [item.id, item.order]),
+    );
+
+    return sortItems(
+      items.map((item, index) => ({
+        ...item,
+        order: orderById.get(item.id) ?? getOrderedValue(item, index),
+      })),
+    );
+  };
+
+  const restoreTreeOrderHistorySnapshot = async (
+    snapshot: TreeOrderHistorySnapshot,
+  ) => {
+    const nextProjects = applyOrderSnapshotItems(
+      store.projects,
+      snapshot.projects,
+      sortProjectsByDisplayOrder,
+    );
+    const nextThemes = applyOrderSnapshotItems(
+      store.themes,
+      snapshot.themes,
+      sortThemesByDisplayOrder,
+    );
+    const nextTopics = applyOrderSnapshotItems(
+      store.topics,
+      snapshot.topics,
+      sortTopicsByDisplayOrder,
+    );
+
+    setStore((current) => ({
+      ...current,
+      projects: nextProjects,
+      themes: nextThemes,
+      topics: nextTopics,
+    }));
+
+    await Promise.all([
+      ...nextProjects.map((project) => putItem("projects", project)),
+      ...nextThemes.map((theme) => putItem("themes", theme)),
+      ...nextTopics.map((topic) => putItem("topics", topic)),
+    ]);
+  };
+
   const restoreDraftHistorySnapshot = (snapshot: DraftHistorySnapshot) => {
     setDraftKind(snapshot.kind);
     setDraftLabel(snapshot.label);
@@ -1716,17 +2035,34 @@ export function App() {
     }
 
     const snapshot = createDraftHistorySnapshot();
+    const lastSnapshot = draftUndoStack[draftUndoStack.length - 1];
 
-    setDraftUndoStack((current) => {
-      const lastSnapshot = current[current.length - 1];
+    if (lastSnapshot && draftHistorySnapshotsEqual(lastSnapshot, snapshot)) {
+      return;
+    }
 
-      if (lastSnapshot && draftHistorySnapshotsEqual(lastSnapshot, snapshot)) {
-        return current;
-      }
-
-      return [...current, snapshot].slice(-draftHistoryLimit);
-    });
+    setDraftUndoStack([...draftUndoStack, snapshot].slice(-draftHistoryLimit));
     setDraftRedoStack([]);
+    pushHistoryUndoAction("draft");
+  };
+
+  const recordTreeOrderHistorySnapshot = (
+    snapshot = createTreeOrderHistorySnapshot(),
+  ) => {
+    const lastSnapshot = treeOrderUndoStack[treeOrderUndoStack.length - 1];
+
+    if (
+      lastSnapshot &&
+      treeOrderHistorySnapshotsEqual(lastSnapshot, snapshot)
+    ) {
+      return;
+    }
+
+    setTreeOrderUndoStack(
+      [...treeOrderUndoStack, snapshot].slice(-draftHistoryLimit),
+    );
+    setTreeOrderRedoStack([]);
+    pushHistoryUndoAction("tree-order");
   };
 
   const undoDraftHistory = () => {
@@ -1740,6 +2076,13 @@ export function App() {
     setDraftUndoStack(draftUndoStack.slice(0, -1));
     setDraftRedoStack((current) =>
       [currentSnapshot, ...current].slice(0, draftHistoryLimit),
+    );
+    setHistoryUndoStack((current) => current.slice(0, -1));
+    setHistoryRedoStack((current) =>
+      [("draft" as HistoryActionKind), ...current].slice(
+        0,
+        draftHistoryLimit,
+      ),
     );
     restoreDraftHistorySnapshot(previousSnapshot);
   };
@@ -1756,7 +2099,56 @@ export function App() {
     setDraftUndoStack((current) =>
       [...current, currentSnapshot].slice(-draftHistoryLimit),
     );
+    setHistoryRedoStack((current) => current.slice(1));
+    setHistoryUndoStack((current) =>
+      [...current, ("draft" as HistoryActionKind)].slice(
+        -draftHistoryLimit,
+      ),
+    );
     restoreDraftHistorySnapshot(nextSnapshot);
+  };
+
+  const undoTreeOrderHistory = async () => {
+    if (treeOrderUndoStack.length === 0) {
+      return;
+    }
+
+    const previousSnapshot = treeOrderUndoStack[treeOrderUndoStack.length - 1];
+    const currentSnapshot = createTreeOrderHistorySnapshot();
+
+    setTreeOrderUndoStack(treeOrderUndoStack.slice(0, -1));
+    setTreeOrderRedoStack((current) =>
+      [currentSnapshot, ...current].slice(0, draftHistoryLimit),
+    );
+    setHistoryUndoStack((current) => current.slice(0, -1));
+    setHistoryRedoStack((current) =>
+      [("tree-order" as HistoryActionKind), ...current].slice(
+        0,
+        draftHistoryLimit,
+      ),
+    );
+    await restoreTreeOrderHistorySnapshot(previousSnapshot);
+  };
+
+  const redoTreeOrderHistory = async () => {
+    if (treeOrderRedoStack.length === 0) {
+      return;
+    }
+
+    const nextSnapshot = treeOrderRedoStack[0];
+    const currentSnapshot = createTreeOrderHistorySnapshot();
+
+    setTreeOrderRedoStack(treeOrderRedoStack.slice(1));
+    setTreeOrderUndoStack((current) =>
+      [...current, currentSnapshot].slice(-draftHistoryLimit),
+    );
+    setHistoryRedoStack((current) => current.slice(1));
+    setHistoryUndoStack((current) =>
+      [...current, ("tree-order" as HistoryActionKind)].slice(
+        -draftHistoryLimit,
+      ),
+    );
+    await restoreTreeOrderHistorySnapshot(nextSnapshot);
   };
 
   useEffect(() => {
@@ -1774,21 +2166,66 @@ export function App() {
         confirmDialog ||
         editingVersionId ||
         isVersionView ||
-        mainView !== "write" ||
-        !selectedTopicId ||
         (!isUndoShortcut && !isRedoShortcut)
       ) {
         return;
       }
 
-      if (isUndoShortcut && draftUndoStack.length > 0) {
+      const canUndoDraft =
+        mainView === "write" && Boolean(selectedTopicId) && draftUndoStack.length > 0;
+      const canRedoDraft =
+        mainView === "write" && Boolean(selectedTopicId) && draftRedoStack.length > 0;
+      const nextUndoKind = historyUndoStack[historyUndoStack.length - 1];
+      const nextRedoKind = historyRedoStack[0];
+
+      if (isUndoShortcut) {
+        const undoKind =
+          nextUndoKind === "tree-order" && treeOrderUndoStack.length > 0
+            ? "tree-order"
+            : nextUndoKind === "draft" && canUndoDraft
+              ? "draft"
+              : canUndoDraft
+                ? "draft"
+                : treeOrderUndoStack.length > 0
+                  ? "tree-order"
+                  : null;
+
+        if (!undoKind) {
+          return;
+        }
+
         event.preventDefault();
-        undoDraftHistory();
+
+        if (undoKind === "draft") {
+          undoDraftHistory();
+        } else {
+          void undoTreeOrderHistory();
+        }
       }
 
-      if (isRedoShortcut && draftRedoStack.length > 0) {
+      if (isRedoShortcut) {
+        const redoKind =
+          nextRedoKind === "tree-order" && treeOrderRedoStack.length > 0
+            ? "tree-order"
+            : nextRedoKind === "draft" && canRedoDraft
+              ? "draft"
+              : canRedoDraft
+                ? "draft"
+                : treeOrderRedoStack.length > 0
+                  ? "tree-order"
+                  : null;
+
+        if (!redoKind) {
+          return;
+        }
+
         event.preventDefault();
-        redoDraftHistory();
+
+        if (redoKind === "draft") {
+          redoDraftHistory();
+        } else {
+          void redoTreeOrderHistory();
+        }
       }
     };
 
@@ -1860,6 +2297,369 @@ export function App() {
     }
   };
 
+  const persistReorderedProjects = async (projects: Project[]) => {
+    const orderedProjects = applySequentialOrder(projects);
+
+    setStore((current) => ({
+      ...current,
+      projects: sortProjectsByDisplayOrder(
+        current.projects.map(
+          (project) =>
+            orderedProjects.find((item) => item.id === project.id) ?? project,
+        ),
+      ),
+    }));
+
+    await Promise.all(
+      orderedProjects.map((project) => putItem("projects", project)),
+    );
+  };
+
+  const persistReorderedThemes = async (themes: Theme[]) => {
+    const orderedThemes = applySequentialOrder(themes);
+
+    setStore((current) => ({
+      ...current,
+      themes: sortThemesByDisplayOrder(
+        current.themes.map(
+          (theme) => orderedThemes.find((item) => item.id === theme.id) ?? theme,
+        ),
+      ),
+    }));
+
+    await Promise.all(orderedThemes.map((theme) => putItem("themes", theme)));
+  };
+
+  const persistReorderedTopics = async (topics: Topic[]) => {
+    const orderedTopics = applySequentialOrder(topics);
+
+    setStore((current) => ({
+      ...current,
+      topics: sortTopicsByDisplayOrder(
+        current.topics.map(
+          (topic) => orderedTopics.find((item) => item.id === topic.id) ?? topic,
+        ),
+      ),
+    }));
+
+    await Promise.all(orderedTopics.map((topic) => putItem("topics", topic)));
+  };
+
+  const finishTreeDragInteraction = () => {
+    treeDragActiveRef.current = false;
+    suppressTreeSelectionUntilRef.current = Date.now() + 350;
+  };
+
+  const cancelTreeDragOverlayFrame = () => {
+    if (treeDragOverlayFrameRef.current !== null) {
+      window.cancelAnimationFrame(treeDragOverlayFrameRef.current);
+      treeDragOverlayFrameRef.current = null;
+    }
+
+    treeDragOverlayPointRef.current = null;
+  };
+
+  const cancelTreeDragSourceHideFrame = () => {
+    if (treeDragSourceHideFrameRef.current !== null) {
+      window.cancelAnimationFrame(treeDragSourceHideFrameRef.current);
+      treeDragSourceHideFrameRef.current = null;
+    }
+  };
+
+  const scheduleTreeDragSourceHide = () => {
+    cancelTreeDragSourceHideFrame();
+    treeDragSourceHideFrameRef.current = window.requestAnimationFrame(() => {
+      treeDragSourceHideFrameRef.current = null;
+      setTreeDragSourceHidden(true);
+    });
+  };
+
+  const scheduleTreeDragOverlayPosition = (
+    kind: RenameTarget["kind"],
+    id: string,
+    event: DragEvent<HTMLElement>,
+  ) => {
+    if (event.clientX === 0 && event.clientY === 0) {
+      return;
+    }
+
+    treeDragOverlayPointRef.current = { x: event.clientX, y: event.clientY };
+
+    if (treeDragOverlayFrameRef.current !== null) {
+      return;
+    }
+
+    treeDragOverlayFrameRef.current = window.requestAnimationFrame(() => {
+      treeDragOverlayFrameRef.current = null;
+      const point = treeDragOverlayPointRef.current;
+
+      if (!point) {
+        return;
+      }
+
+      setTreeDragOverlay((current) => {
+        if (!current || current.kind !== kind || current.id !== id) {
+          return current;
+        }
+
+        if (
+          Math.abs(current.x - point.x) < 1 &&
+          Math.abs(current.y - point.y) < 1
+        ) {
+          return current;
+        }
+
+        return { ...current, x: point.x, y: point.y };
+      });
+    });
+  };
+
+  const getTreeDropAnchorY = (event: DragEvent<HTMLElement>) => {
+    if (
+      treeDragOverlay &&
+      draggedTreeTarget &&
+      treeDragOverlay.kind === draggedTreeTarget.kind &&
+      treeDragOverlay.id === draggedTreeTarget.id
+    ) {
+      return event.clientY - treeDragOverlay.offsetY + treeDragOverlay.height / 2;
+    }
+
+    return event.clientY;
+  };
+
+  const getTreeInsertAfterTarget = (event: DragEvent<HTMLElement>) =>
+    isDropAfterTarget(event, getTreeDropAnchorY(event));
+
+  const handleTreeDragStart = (
+    kind: RenameTarget["kind"],
+    id: string,
+    event: DragEvent<HTMLElement>,
+  ) => {
+    treeDragActiveRef.current = true;
+    suppressTreeSelectionUntilRef.current = Number.POSITIVE_INFINITY;
+    cancelTreeDragOverlayFrame();
+    cancelTreeDragSourceHideFrame();
+    setTreeDragSourceHidden(false);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", id);
+    const row = event.currentTarget.closest<HTMLElement>(`.${kind}-row`);
+    const rect = row?.getBoundingClientRect();
+
+    setTreeDragOverlay({
+      kind,
+      id,
+      height: rect?.height ?? 32,
+      offsetX: rect
+        ? Math.max(0, Math.min(rect.width, event.clientX - rect.left))
+        : 0,
+      offsetY: rect
+        ? Math.max(0, Math.min(rect.height, event.clientY - rect.top))
+        : 0,
+      width: rect?.width ?? 220,
+      x: event.clientX,
+      y: event.clientY,
+    });
+    setTreeDropPreview({ kind, id, position: "after" });
+    setDraggedTreeTarget({ kind, id });
+    scheduleTreeDragSourceHide();
+  };
+
+  const handleTreeDrag = (
+    kind: RenameTarget["kind"],
+    id: string,
+    event: DragEvent<HTMLElement>,
+  ) => {
+    scheduleTreeDragOverlayPosition(kind, id, event);
+  };
+
+  const updateTreeDragOverlayPosition = (event: DragEvent<HTMLElement>) => {
+    if (!treeDragOverlay) {
+      return;
+    }
+
+    scheduleTreeDragOverlayPosition(
+      treeDragOverlay.kind,
+      treeDragOverlay.id,
+      event,
+    );
+  };
+
+  const handleTreeDragOver = (
+    kind: RenameTarget["kind"],
+    id: string,
+    event: DragEvent<HTMLElement>,
+    positionOverride?: DropPreviewPosition,
+  ) => {
+    if (!draggedTreeTarget || draggedTreeTarget.kind !== kind) {
+      setTreeDropPreview(null);
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+
+    if (draggedTreeTarget.id === id) {
+      setTreeDropPreview((current) =>
+        current?.kind === kind && current.id === id
+          ? current
+          : {
+              kind,
+              id,
+              position: "after",
+            },
+      );
+      return;
+    }
+
+    const position =
+      positionOverride ?? (getTreeInsertAfterTarget(event) ? "after" : "before");
+    setTreeDropPreview((current) =>
+      current?.kind === kind &&
+      current.id === id &&
+      current.position === position
+        ? current
+        : { kind, id, position },
+    );
+  };
+
+  const isTreeRowDragEvent = (
+    kind: RenameTarget["kind"],
+    event: DragEvent<HTMLDivElement>,
+  ) => {
+    const target = event.target;
+
+    if (!(target instanceof Element)) {
+      return false;
+    }
+
+    const row = target.closest(`.${kind}-row`);
+    return Boolean(row && event.currentTarget.contains(row));
+  };
+
+  const handleTreeListDragOver = (
+    kind: RenameTarget["kind"],
+    lastId: string | undefined,
+    event: DragEvent<HTMLDivElement>,
+  ) => {
+    if (
+      !lastId ||
+      !draggedTreeTarget ||
+      draggedTreeTarget.kind !== kind ||
+      isTreeRowDragEvent(kind, event)
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setTreeDropPreview((current) =>
+      current?.kind === kind &&
+      current.id === lastId &&
+      current.position === "after"
+        ? current
+        : { kind, id: lastId, position: "after" },
+    );
+  };
+
+  const handleTreeListDrop = async (
+    kind: RenameTarget["kind"],
+    lastId: string | undefined,
+    event: DragEvent<HTMLDivElement>,
+  ) => {
+    if (!lastId || isTreeRowDragEvent(kind, event)) {
+      return;
+    }
+
+    await handleTreeDrop(kind, lastId, event, true);
+  };
+
+  const handleTreeDrop = async (
+    kind: RenameTarget["kind"],
+    id: string,
+    event: DragEvent<HTMLElement>,
+    insertAfterOverride?: boolean,
+  ) => {
+    const draggedTarget = draggedTreeTarget;
+
+    if (
+      !draggedTarget ||
+      draggedTarget.kind !== kind ||
+      draggedTarget.id === id
+    ) {
+      flushSync(() => {
+        cancelTreeDragOverlayFrame();
+        cancelTreeDragSourceHideFrame();
+        finishTreeDragInteraction();
+        setTreeDragSourceHidden(false);
+        setDraggedTreeTarget(null);
+        setTreeDropPreview(null);
+        setTreeDragOverlay(null);
+      });
+      return;
+    }
+
+    event.preventDefault();
+    const insertAfter = insertAfterOverride ?? getTreeInsertAfterTarget(event);
+    const previousOrderSnapshot = createTreeOrderHistorySnapshot();
+
+    try {
+      let reorderPromise: Promise<void> = Promise.resolve();
+
+      flushSync(() => {
+        cancelTreeDragOverlayFrame();
+        cancelTreeDragSourceHideFrame();
+
+        if (kind === "project") {
+          reorderPromise = persistReorderedProjects(
+            moveItemById(
+              sortProjectsByDisplayOrder(store.projects),
+              draggedTarget.id,
+              id,
+              insertAfter,
+            ),
+          );
+        } else if (kind === "theme") {
+          reorderPromise = persistReorderedThemes(
+            moveItemById(projectThemes, draggedTarget.id, id, insertAfter),
+          );
+        } else {
+          reorderPromise = persistReorderedTopics(
+            moveItemById(themeTopics, draggedTarget.id, id, insertAfter),
+          );
+        }
+
+        finishTreeDragInteraction();
+        setTreeDragSourceHidden(false);
+        setDraggedTreeTarget(null);
+        setTreeDropPreview(null);
+        setTreeDragOverlay(null);
+      });
+
+      await reorderPromise;
+      recordTreeOrderHistorySnapshot(previousOrderSnapshot);
+    } catch (reorderError) {
+      showToast(
+        reorderError instanceof Error ? reorderError.message : ui.actionFailed,
+        "error",
+      );
+      await refresh();
+    } finally {
+      setDraggedTreeTarget(null);
+      setTreeDropPreview(null);
+      setTreeDragOverlay(null);
+    }
+  };
+
+  const handleTreeDragEnd = () => {
+    cancelTreeDragOverlayFrame();
+    cancelTreeDragSourceHideFrame();
+    finishTreeDragInteraction();
+    setTreeDragSourceHidden(false);
+    setDraggedTreeTarget(null);
+    setTreeDropPreview(null);
+    setTreeDragOverlay(null);
+  };
+
   const handleProjectCreate = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const name = newProjectName.trim();
@@ -1871,6 +2671,7 @@ export function App() {
     const id = createId();
     await putItem("projects", {
       id,
+      order: getNextOrder(displayProjects),
       name,
       description: "",
       createdAt,
@@ -2085,6 +2886,7 @@ export function App() {
     await putItem("themes", {
       id,
       projectId: selectedProjectId,
+      order: getNextOrder(projectThemes),
       name,
       color: newThemeColor,
       createdAt,
@@ -2111,6 +2913,7 @@ export function App() {
       id,
       projectId: selectedProjectId,
       themeId: selectedThemeId,
+      order: getNextOrder(themeTopics),
       kind: newTopicKind,
       modelIds: newTopicModelIds,
       title,
@@ -2481,6 +3284,28 @@ export function App() {
     });
   };
 
+  const handleDraftResultTextReorder = (
+    draggedIndex: number,
+    targetIndex: number,
+    insertAfter: boolean,
+  ) => {
+    const sourceTexts = toEditableResultTexts(draftResultTexts);
+    const nextTexts = moveItemByIndex(
+      sourceTexts,
+      draggedIndex,
+      targetIndex,
+      insertAfter,
+    );
+
+    if (nextTexts === sourceTexts) {
+      return;
+    }
+
+    recordDraftHistorySnapshot();
+    setDraftResultTexts(nextTexts);
+    markEditorChanged();
+  };
+
   const resetDraftResultTexts = () => {
     recordDraftHistorySnapshot();
     setDraftResultTexts(getEditableVersionResultTexts(editingVersion ?? latestVersion));
@@ -2586,7 +3411,9 @@ export function App() {
       return;
     }
 
-    const nextDraftImages = draftImages.filter((item) => item.id !== imageId);
+    const nextDraftImages = draftImages
+      .filter((item) => item.id !== imageId)
+      .map((item, index) => ({ ...item, order: index }));
     const sourceImageId = editingVersion ? image.sourceId : undefined;
 
     if (sourceImageId && editingVersion) {
@@ -2630,6 +3457,32 @@ export function App() {
       confirmLabel: ui.delete,
       onConfirm: () => deleteDraftImage(imageId),
     });
+  };
+
+  const handleDraftImageReorder = (
+    draggedImageId: string,
+    targetImageId: string,
+    insertAfter: boolean,
+  ) => {
+    const movedImages = moveItemById(
+      draftImages,
+      draggedImageId,
+      targetImageId,
+      insertAfter,
+    );
+
+    if (movedImages === draftImages) {
+      return;
+    }
+
+    const nextImages = movedImages.map((image, index) => ({
+      ...image,
+      order: index,
+    }));
+
+    recordDraftHistorySnapshot();
+    setDraftImages(nextImages);
+    markEditorChanged();
   };
 
   const handleVersionSave = async () => {
@@ -2685,10 +3538,11 @@ export function App() {
     };
     await putItem("versions", nextVersion);
 
-    const imagesToSave: ImageAsset[] = draftImages.map((image) => {
+    const imagesToSave: ImageAsset[] = draftImages.map((image, index) => {
       const { kind, name, type, dataUrl } = image;
       return {
         id: createId(),
+        order: index,
         kind,
         name,
         type,
@@ -2823,13 +3677,14 @@ export function App() {
     await putItem("versions", nextVersion);
     await Promise.all(existingImageIds.map((id) => deleteItem("images", id)));
     await Promise.all(
-      imagesToSave.map((image) => {
+      imagesToSave.map((image, index) => {
         const { kind: mediaKind, name, type, dataUrl } = image;
         const id = image.sourceId ?? image.id;
         const existingImage = existingImageMap.get(id);
 
         return putItem("images", {
           id,
+          order: index,
           kind: mediaKind,
           name,
           type,
@@ -3410,9 +4265,225 @@ export function App() {
       : sidebarView === "history"
         ? ui.history
         : ui.models;
+  const noopTreePreviewAction = () => {};
+  const draggedProjectPreview =
+    draggedTreeTarget?.kind === "project"
+      ? displayProjects.find((project) => project.id === draggedTreeTarget.id) ??
+        null
+      : null;
+  const draggedThemePreview =
+    draggedTreeTarget?.kind === "theme"
+      ? projectThemes.find((theme) => theme.id === draggedTreeTarget.id) ?? null
+      : null;
+  const draggedTopicPreview =
+    draggedTreeTarget?.kind === "topic"
+      ? themeTopics.find((topic) => topic.id === draggedTreeTarget.id) ?? null
+      : null;
+  const renderProjectDropPreview = (
+    targetId: string,
+    position: DropPreviewPosition,
+  ) =>
+    draggedProjectPreview ? (
+      <TreeRow
+        kind="project"
+        active={false}
+        count={themeCountByProject[draggedProjectPreview.id] ?? 0}
+        deleteLabel=""
+        draggable
+        icon={<Folder aria-hidden="true" size={15} />}
+        name={draggedProjectPreview.name}
+        preview
+        onClick={noopTreePreviewAction}
+        onDelete={noopTreePreviewAction}
+        onDoubleClick={noopTreePreviewAction}
+        onDragOver={(event) =>
+          handleTreeDragOver("project", targetId, event, position)
+        }
+        onDrop={(event) =>
+          void handleTreeDrop("project", targetId, event, position === "after")
+        }
+      />
+    ) : null;
+  const renderThemeDropPreview = (
+    targetId: string,
+    position: DropPreviewPosition,
+  ) => {
+    if (!draggedThemePreview) {
+      return null;
+    }
+
+    const ThemeIcon = Folder;
+
+    return (
+      <TreeRow
+        kind="theme"
+        active={false}
+        count={topicCountByTheme[draggedThemePreview.id] ?? 0}
+        deleteLabel=""
+        draggable
+        icon={
+          <ThemeIcon
+            aria-hidden="true"
+            className="theme-folder-icon"
+            size={15}
+            style={{ color: draggedThemePreview.color }}
+          />
+        }
+        name={draggedThemePreview.name}
+        preview
+        onClick={noopTreePreviewAction}
+        onDelete={noopTreePreviewAction}
+        onDoubleClick={noopTreePreviewAction}
+        onDragOver={(event) =>
+          handleTreeDragOver("theme", targetId, event, position)
+        }
+        onDrop={(event) =>
+          void handleTreeDrop("theme", targetId, event, position === "after")
+        }
+      />
+    );
+  };
+  const renderTopicDropPreview = (
+    targetId: string,
+    position: DropPreviewPosition,
+  ) => {
+    if (!draggedTopicPreview) {
+      return null;
+    }
+
+    const TopicIcon = getTopicIconComponent(getTopicKind(draggedTopicPreview));
+    const versionCount = store.versions.filter(
+      (version) => version.topicId === draggedTopicPreview.id,
+    ).length;
+
+    return (
+      <TreeRow
+        kind="topic"
+        active={false}
+        count={versionCount}
+        deleteLabel=""
+        draggable
+        icon={<TopicIcon aria-hidden="true" size={15} />}
+        name={draggedTopicPreview.title}
+        preview
+        onClick={noopTreePreviewAction}
+        onDelete={noopTreePreviewAction}
+        onDoubleClick={noopTreePreviewAction}
+        onDragOver={(event) =>
+          handleTreeDragOver("topic", targetId, event, position)
+        }
+        onDrop={(event) =>
+          void handleTreeDrop("topic", targetId, event, position === "after")
+        }
+      />
+    );
+  };
+  const renderTreeFloatingPreview = () => {
+    if (!treeDragOverlay) {
+      return null;
+    }
+
+    const overlayStyle = {
+      left: treeDragOverlay.x - treeDragOverlay.offsetX,
+      top: treeDragOverlay.y - treeDragOverlay.offsetY,
+      width: treeDragOverlay.width,
+    };
+
+    if (treeDragOverlay.kind === "project" && draggedProjectPreview) {
+      return (
+        <div className="drag-floating-preview" style={overlayStyle}>
+          <TreeRow
+            kind="project"
+            active={draggedProjectPreview.id === selectedProjectId}
+            count={themeCountByProject[draggedProjectPreview.id] ?? 0}
+            deleteLabel=""
+            draggable
+            icon={
+              draggedProjectPreview.id === selectedProjectId ? (
+                <FolderOpen aria-hidden="true" size={15} />
+              ) : (
+                <Folder aria-hidden="true" size={15} />
+              )
+            }
+            name={draggedProjectPreview.name}
+            preview
+            previewVariant="floating"
+            onClick={noopTreePreviewAction}
+            onDelete={noopTreePreviewAction}
+            onDoubleClick={noopTreePreviewAction}
+          />
+        </div>
+      );
+    }
+
+    if (treeDragOverlay.kind === "theme" && draggedThemePreview) {
+      const ThemeIcon =
+        draggedThemePreview.id === selectedThemeId ? FolderOpen : Folder;
+
+      return (
+        <div className="drag-floating-preview" style={overlayStyle}>
+          <TreeRow
+            kind="theme"
+            active={draggedThemePreview.id === selectedThemeId}
+            count={topicCountByTheme[draggedThemePreview.id] ?? 0}
+            deleteLabel=""
+            draggable
+            icon={
+              <ThemeIcon
+                aria-hidden="true"
+                className="theme-folder-icon"
+                size={15}
+                style={{ color: draggedThemePreview.color }}
+              />
+            }
+            name={draggedThemePreview.name}
+            preview
+            previewVariant="floating"
+            onClick={noopTreePreviewAction}
+            onDelete={noopTreePreviewAction}
+            onDoubleClick={noopTreePreviewAction}
+          />
+        </div>
+      );
+    }
+
+    if (treeDragOverlay.kind === "topic" && draggedTopicPreview) {
+      const TopicIcon = getTopicIconComponent(getTopicKind(draggedTopicPreview));
+      const versionCount = store.versions.filter(
+        (version) => version.topicId === draggedTopicPreview.id,
+      ).length;
+
+      return (
+        <div className="drag-floating-preview" style={overlayStyle}>
+          <TreeRow
+            kind="topic"
+            active={draggedTopicPreview.id === selectedTopicId}
+            count={versionCount}
+            deleteLabel=""
+            draggable
+            icon={<TopicIcon aria-hidden="true" size={15} />}
+            name={draggedTopicPreview.title}
+            preview
+            previewVariant="floating"
+            onClick={noopTreePreviewAction}
+            onDelete={noopTreePreviewAction}
+            onDoubleClick={noopTreePreviewAction}
+          />
+        </div>
+      );
+    }
+
+    return null;
+  };
 
   return (
-    <div className="app-shell" data-theme={appearanceTheme}>
+    <div
+      className="app-shell"
+      data-theme={appearanceTheme}
+      data-tree-dragging={draggedTreeTarget ? "true" : undefined}
+      onDragOver={updateTreeDragOverlayPosition}
+    >
+      {renderTreeFloatingPreview()}
       <nav className="activity-bar" aria-label={ui.workViewAria}>
         <button
           type="button"
@@ -3510,7 +4581,7 @@ export function App() {
                 <span className="section-title-label">
                   <ChevronDown aria-hidden="true" size={13} />
                   {ui.projectsSection}
-                  <small>{store.projects.length}</small>
+                  <small>{displayProjects.length}</small>
                 </span>
                 <button
                   type="button"
@@ -3523,42 +4594,93 @@ export function App() {
                   <FolderPlus aria-hidden="true" size={15} />
                 </button>
               </div>
-              <div className="project-list">
-                {store.projects.map((project) => {
+              <div
+                className="project-list"
+                onDragOver={(event) =>
+                  handleTreeListDragOver(
+                    "project",
+                    displayProjects[displayProjects.length - 1]?.id,
+                    event,
+                  )
+                }
+                onDrop={(event) =>
+                  void handleTreeListDrop(
+                    "project",
+                    displayProjects[displayProjects.length - 1]?.id,
+                    event,
+                  )
+                }
+              >
+                {displayProjects.map((project) => {
                   const isRenaming =
                     renameTarget?.kind === "project" &&
                     renameTarget.id === project.id;
+                  const canReorderProjects = displayProjects.length > 1;
+                  const showDropPreviewBefore =
+                    treeDropPreview?.kind === "project" &&
+                    treeDropPreview.id === project.id &&
+                    treeDropPreview.position === "before";
+                  const showDropPreviewAfter =
+                    treeDropPreview?.kind === "project" &&
+                    treeDropPreview.id === project.id &&
+                    treeDropPreview.position === "after";
+                  const isDraggingProject =
+                    draggedTreeTarget?.kind === "project" &&
+                    draggedTreeTarget.id === project.id;
 
                   return (
-                    <TreeRow
-                      key={project.id}
-                      kind="project"
-                      active={project.id === selectedProjectId}
-                      count={themeCountByProject[project.id] ?? 0}
-                      deleteLabel={ui.deleteProjectAria(project.name)}
-                      icon={
-                        project.id === selectedProjectId ? (
-                          <FolderOpen aria-hidden="true" size={15} />
-                        ) : (
-                          <Folder aria-hidden="true" size={15} />
-                        )
-                      }
-                      name={project.name}
-                      renaming={isRenaming}
-                      renameValue={renameTarget?.value}
-                      onClick={() => openProjectPath(project.id)}
-                      onDelete={() => handleProjectDelete(project)}
-                      onDoubleClick={() =>
-                        startRename({
-                          kind: "project",
-                          id: project.id,
-                          value: project.name,
-                        })
-                      }
-                      onRenameCancel={cancelRename}
-                      onRenameChange={updateRenameValue}
-                      onRenameCommit={() => void commitRename()}
-                    />
+                    <Fragment key={project.id}>
+                      {showDropPreviewBefore
+                        ? renderProjectDropPreview(project.id, "before")
+                        : null}
+                      <TreeRow
+                        kind="project"
+                        active={project.id === selectedProjectId}
+                        count={themeCountByProject[project.id] ?? 0}
+                        deleteLabel={ui.deleteProjectAria(project.name)}
+                        icon={
+                          project.id === selectedProjectId ? (
+                            <FolderOpen aria-hidden="true" size={15} />
+                          ) : (
+                            <Folder aria-hidden="true" size={15} />
+                          )
+                        }
+                        name={project.name}
+                        hideDelete={Boolean(draggedTreeTarget)}
+                        renaming={isRenaming}
+                        renameValue={renameTarget?.value}
+                        onClick={() => openProjectPath(project.id)}
+                        onDelete={() => handleProjectDelete(project)}
+                        onDoubleClick={() =>
+                          startRename({
+                            kind: "project",
+                            id: project.id,
+                            value: project.name,
+                          })
+                        }
+                        onRenameCancel={cancelRename}
+                        onRenameChange={updateRenameValue}
+                        onRenameCommit={() => void commitRename()}
+                        draggable={!isRenaming && canReorderProjects}
+                        layoutHidden={isDraggingProject && treeDragSourceHidden}
+                        onDragStart={(event) =>
+                          handleTreeDragStart("project", project.id, event)
+                        }
+                        onDrag={(event) =>
+                          handleTreeDrag("project", project.id, event)
+                        }
+                        onDragOver={(event) =>
+                          handleTreeDragOver("project", project.id, event)
+                        }
+                        onDrop={(event) =>
+                          void handleTreeDrop("project", project.id, event)
+                        }
+                        onDragEnd={handleTreeDragEnd}
+                      />
+                      {showDropPreviewAfter
+                        ? renderProjectDropPreview(project.id, "after")
+                        : null}
+                    </Fragment>
                   );
                 })}
               </div>
@@ -3623,45 +4745,96 @@ export function App() {
                     <Plus aria-hidden="true" size={15} />
                   </button>
                 </div>
-                <div className="theme-list">
+                <div
+                  className="theme-list"
+                  onDragOver={(event) =>
+                    handleTreeListDragOver(
+                      "theme",
+                      projectThemes[projectThemes.length - 1]?.id,
+                      event,
+                    )
+                  }
+                  onDrop={(event) =>
+                    void handleTreeListDrop(
+                      "theme",
+                      projectThemes[projectThemes.length - 1]?.id,
+                      event,
+                    )
+                  }
+                >
                   {projectThemes.map((theme) => {
                     const isRenaming =
                       renameTarget?.kind === "theme" &&
                       renameTarget.id === theme.id;
                     const ThemeIcon =
                       theme.id === selectedThemeId ? FolderOpen : Folder;
+                    const canReorderThemes = projectThemes.length > 1;
+                    const showDropPreviewBefore =
+                      treeDropPreview?.kind === "theme" &&
+                      treeDropPreview.id === theme.id &&
+                      treeDropPreview.position === "before";
+                    const showDropPreviewAfter =
+                      treeDropPreview?.kind === "theme" &&
+                      treeDropPreview.id === theme.id &&
+                      treeDropPreview.position === "after";
+                    const isDraggingTheme =
+                      draggedTreeTarget?.kind === "theme" &&
+                      draggedTreeTarget.id === theme.id;
 
                     return (
-                      <TreeRow
-                        key={theme.id}
-                        kind="theme"
-                        active={theme.id === selectedThemeId}
-                        count={topicCountByTheme[theme.id] ?? 0}
-                        deleteLabel={ui.deleteThemeAria(theme.name)}
-                        icon={
-                          <ThemeIcon
-                            aria-hidden="true"
-                            className="theme-folder-icon"
-                            size={15}
-                            style={{ color: theme.color }}
-                          />
-                        }
-                        name={theme.name}
-                        renaming={isRenaming}
-                        renameValue={renameTarget?.value}
-                        onClick={() => openThemePath(theme.id)}
-                        onDelete={() => handleThemeDelete(theme)}
-                        onDoubleClick={() =>
-                          startRename({
-                            kind: "theme",
-                            id: theme.id,
-                            value: theme.name,
-                          })
-                        }
-                        onRenameCancel={cancelRename}
-                        onRenameChange={updateRenameValue}
-                        onRenameCommit={() => void commitRename()}
-                      />
+                      <Fragment key={theme.id}>
+                        {showDropPreviewBefore
+                          ? renderThemeDropPreview(theme.id, "before")
+                          : null}
+                        <TreeRow
+                          kind="theme"
+                          active={theme.id === selectedThemeId}
+                          count={topicCountByTheme[theme.id] ?? 0}
+                          deleteLabel={ui.deleteThemeAria(theme.name)}
+                          icon={
+                            <ThemeIcon
+                              aria-hidden="true"
+                              className="theme-folder-icon"
+                              size={15}
+                              style={{ color: theme.color }}
+                            />
+                          }
+                          name={theme.name}
+                          hideDelete={Boolean(draggedTreeTarget)}
+                          renaming={isRenaming}
+                          renameValue={renameTarget?.value}
+                          onClick={() => openThemePath(theme.id)}
+                          onDelete={() => handleThemeDelete(theme)}
+                          onDoubleClick={() =>
+                            startRename({
+                              kind: "theme",
+                              id: theme.id,
+                              value: theme.name,
+                            })
+                          }
+                          onRenameCancel={cancelRename}
+                          onRenameChange={updateRenameValue}
+                          onRenameCommit={() => void commitRename()}
+                          draggable={!isRenaming && canReorderThemes}
+                          layoutHidden={isDraggingTheme && treeDragSourceHidden}
+                          onDragStart={(event) =>
+                            handleTreeDragStart("theme", theme.id, event)
+                          }
+                          onDrag={(event) =>
+                            handleTreeDrag("theme", theme.id, event)
+                          }
+                          onDragOver={(event) =>
+                            handleTreeDragOver("theme", theme.id, event)
+                          }
+                          onDrop={(event) =>
+                            void handleTreeDrop("theme", theme.id, event)
+                          }
+                          onDragEnd={handleTreeDragEnd}
+                        />
+                        {showDropPreviewAfter
+                          ? renderThemeDropPreview(theme.id, "after")
+                          : null}
+                      </Fragment>
                     );
                   })}
                 </div>
@@ -3742,7 +4915,23 @@ export function App() {
                     <Plus aria-hidden="true" size={15} />
                   </button>
                 </div>
-                <div className="topic-list">
+                <div
+                  className="topic-list"
+                  onDragOver={(event) =>
+                    handleTreeListDragOver(
+                      "topic",
+                      themeTopics[themeTopics.length - 1]?.id,
+                      event,
+                    )
+                  }
+                  onDrop={(event) =>
+                    void handleTreeListDrop(
+                      "topic",
+                      themeTopics[themeTopics.length - 1]?.id,
+                      event,
+                    )
+                  }
+                >
                   {themeTopics.map((topic) => {
                     const count = store.versions.filter(
                       (version) => version.topicId === topic.id,
@@ -3751,33 +4940,65 @@ export function App() {
                       renameTarget?.kind === "topic" &&
                       renameTarget.id === topic.id;
                     const TopicIcon = getTopicIconComponent(getTopicKind(topic));
+                    const canReorderTopics = themeTopics.length > 1;
+                    const showDropPreviewBefore =
+                      treeDropPreview?.kind === "topic" &&
+                      treeDropPreview.id === topic.id &&
+                      treeDropPreview.position === "before";
+                    const showDropPreviewAfter =
+                      treeDropPreview?.kind === "topic" &&
+                      treeDropPreview.id === topic.id &&
+                      treeDropPreview.position === "after";
+                    const isDraggingTopic =
+                      draggedTreeTarget?.kind === "topic" &&
+                      draggedTreeTarget.id === topic.id;
                     return (
-                      <TreeRow
-                        key={topic.id}
-                        kind="topic"
-                        active={topic.id === selectedTopicId}
-                        count={count}
-                        deleteLabel={ui.deleteTopicAria(topic.title)}
-                        icon={<TopicIcon aria-hidden="true" size={15} />}
-                        name={topic.title}
-                        renaming={isRenaming}
-                        renameValue={renameTarget?.value}
-                        onClick={() => {
-                          setSelectedTopicId(topic.id);
-                          setCreatePanel(null);
-                        }}
-                        onDelete={() => handleTopicDelete(topic)}
-                        onDoubleClick={() =>
-                          startRename({
-                            kind: "topic",
-                            id: topic.id,
-                            value: topic.title,
-                          })
-                        }
-                        onRenameCancel={cancelRename}
-                        onRenameChange={updateRenameValue}
-                        onRenameCommit={() => void commitRename()}
-                      />
+                      <Fragment key={topic.id}>
+                        {showDropPreviewBefore
+                          ? renderTopicDropPreview(topic.id, "before")
+                          : null}
+                          <TreeRow
+                            kind="topic"
+                            active={topic.id === selectedTopicId}
+                          count={count}
+                          deleteLabel={ui.deleteTopicAria(topic.title)}
+                          icon={<TopicIcon aria-hidden="true" size={15} />}
+                          name={topic.title}
+                          hideDelete={Boolean(draggedTreeTarget)}
+                          renaming={isRenaming}
+                          renameValue={renameTarget?.value}
+                          onClick={() => openTopicPath(topic.id)}
+                          onDelete={() => handleTopicDelete(topic)}
+                          onDoubleClick={() =>
+                            startRename({
+                              kind: "topic",
+                              id: topic.id,
+                              value: topic.title,
+                            })
+                          }
+                          onRenameCancel={cancelRename}
+                          onRenameChange={updateRenameValue}
+                          onRenameCommit={() => void commitRename()}
+                          draggable={!isRenaming && canReorderTopics}
+                          layoutHidden={isDraggingTopic && treeDragSourceHidden}
+                          onDragStart={(event) =>
+                            handleTreeDragStart("topic", topic.id, event)
+                          }
+                          onDrag={(event) =>
+                            handleTreeDrag("topic", topic.id, event)
+                          }
+                          onDragOver={(event) =>
+                            handleTreeDragOver("topic", topic.id, event)
+                          }
+                          onDrop={(event) =>
+                            void handleTreeDrop("topic", topic.id, event)
+                          }
+                          onDragEnd={handleTreeDragEnd}
+                        />
+                        {showDropPreviewAfter
+                          ? renderTopicDropPreview(topic.id, "after")
+                          : null}
+                      </Fragment>
                     );
                   })}
                 </div>
@@ -4062,6 +5283,8 @@ export function App() {
                   onRemoveDraftImage={handleDraftImageDelete}
                   onRemoveDraftResultText={handleDraftResultTextDelete}
                   onRemoveDraftSystemPrompt={handleDraftSystemPromptDelete}
+                  onReorderDraftImage={handleDraftImageReorder}
+                  onReorderDraftResultText={handleDraftResultTextReorder}
                   onResetDraftResultTexts={resetDraftResultTexts}
                   onResetDraftSystemPrompts={resetDraftSystemPrompts}
                 />

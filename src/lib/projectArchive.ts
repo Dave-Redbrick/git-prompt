@@ -37,6 +37,7 @@ type ArchiveResultFile = {
   path: string;
   createdAt: string;
   index?: number;
+  order?: number;
 };
 
 type ProjectArchiveManifestV1 = {
@@ -545,6 +546,7 @@ export const importProjectArchiveZip = async (
                 versionIdMap.get(resultFile.versionId) ?? resultFile.versionId,
               kind: resultFile.kind,
               name: resultFile.name,
+              order: resultFile.order,
               type: resultFile.type,
               dataUrl: bytesToDataUrl(resultData, resultFile.type),
               createdAt: resultFile.createdAt,
@@ -562,6 +564,7 @@ export const importProjectArchiveZip = async (
             versionId: versionIdMap.get(image.versionId) ?? image.versionId,
             kind: image.kind,
             name: image.name,
+            order: image.order,
             type: image.type,
             dataUrl: bytesToDataUrl(imageData, image.type),
             createdAt: image.createdAt,

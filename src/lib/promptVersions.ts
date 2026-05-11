@@ -143,9 +143,10 @@ export const getCommitMemo = (notes: string | undefined, fallback: string) =>
   notes?.trim() || fallback;
 
 export const copyImagesToDraft = (images: ImageAsset[]): DraftImage[] =>
-  images.map((image) => ({
+  images.map((image, index) => ({
     id: createId(),
     sourceId: image.id,
+    order: image.order ?? index,
     kind: image.kind,
     name: image.name,
     type: image.type,

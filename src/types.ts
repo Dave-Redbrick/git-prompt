@@ -55,6 +55,7 @@ export type VersionCostSnapshot = {
 
 export type Project = {
   id: string;
+  order?: number;
   name: string;
   description: string;
   createdAt: string;
@@ -64,6 +65,7 @@ export type Project = {
 export type Theme = {
   id: string;
   projectId: string;
+  order?: number;
   name: string;
   color: string;
   createdAt: string;
@@ -74,6 +76,7 @@ export type Topic = {
   id: string;
   projectId: string;
   themeId?: string;
+  order?: number;
   kind?: PromptVersionKind;
   modelIds?: TopicModelId[];
   title: string;
@@ -122,6 +125,7 @@ export type ImageAsset = {
   id: string;
   topicId: string;
   versionId: string;
+  order?: number;
   kind?: ResultMediaKind;
   name: string;
   type: string;
@@ -131,7 +135,7 @@ export type ImageAsset = {
 
 export type DraftImage = Pick<
   ImageAsset,
-  "id" | "kind" | "name" | "type" | "dataUrl"
+  "id" | "order" | "kind" | "name" | "type" | "dataUrl"
 > & {
   sourceId?: string;
 };

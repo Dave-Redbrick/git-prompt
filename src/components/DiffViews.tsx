@@ -1,4 +1,11 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { ReactNode } from "react";
 import type { LineDiffRow } from "../lib/diff";
 import { pauseOtherAudioInGroup } from "../lib/audioPlayback";
@@ -98,6 +105,47 @@ const getOverviewMarkerStyle = (
     height: `${marker.height}px`,
     top: `${marker.top}px`,
   };
+};
+
+const getScrollableChildTop = (
+  containerElement: HTMLElement,
+  childElement: HTMLElement,
+) => {
+  if (childElement.offsetParent === containerElement) {
+    return childElement.offsetTop;
+  }
+
+  if (childElement.offsetParent === containerElement.offsetParent) {
+    return childElement.offsetTop - containerElement.offsetTop;
+  }
+
+  const containerRect = containerElement.getBoundingClientRect();
+  const childRect = childElement.getBoundingClientRect();
+
+  return childRect.top - containerRect.top + containerElement.scrollTop;
+};
+
+const areOverviewMarkerLayoutsEqual = (
+  left: DiffOverviewMarkerLayout,
+  right: DiffOverviewMarkerLayout,
+) => {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+
+  return leftKeys.every((key) => {
+    const leftValue = left[key];
+    const rightValue = right[key];
+
+    return (
+      rightValue &&
+      Math.abs(leftValue.top - rightValue.top) < 0.5 &&
+      Math.abs(leftValue.height - rightValue.height) < 0.5
+    );
+  });
 };
 
 const getRenderedOverviewMarkers = (
@@ -210,29 +258,16 @@ export function SplitDiffFiles({
       !overviewElement ||
       overviewMarkers.length === 0
     ) {
-      setOverviewMarkerLayout({});
+      setOverviewMarkerLayout((currentLayout) =>
+        Object.keys(currentLayout).length > 0 ? {} : currentLayout,
+      );
       return;
     }
 
-    const rowElements = Array.from(
-      codeLinesElement.querySelectorAll<HTMLElement>("[data-diff-row-index]"),
-    );
-    const codeLinesRect = codeLinesElement.getBoundingClientRect();
-    const rowBounds = rowElements.map((rowElement) => {
-      const rowRect = rowElement.getBoundingClientRect();
-      const top = rowRect.top - codeLinesRect.top + codeLinesElement.scrollTop;
-
-      return {
-        bottom: top + rowRect.height,
-        top,
-      };
-    });
-    const renderedContentBottom = rowBounds.reduce(
-      (bottom, bounds) => Math.max(bottom, bounds.bottom),
-      0,
+    const rowElements = codeLinesElement.querySelectorAll<HTMLElement>(
+      "[data-diff-row-index]",
     );
     const contentHeight = Math.max(
-      renderedContentBottom,
       codeLinesElement.scrollHeight,
       codeLinesElement.clientHeight,
       1,
@@ -240,24 +275,29 @@ export function SplitDiffFiles({
     const overviewHeight = overviewElement.clientHeight;
 
     if (overviewHeight <= 0) {
-      setOverviewMarkerLayout({});
+      setOverviewMarkerLayout((currentLayout) =>
+        Object.keys(currentLayout).length > 0 ? {} : currentLayout,
+      );
       return;
     }
 
     const nextLayout: DiffOverviewMarkerLayout = {};
 
     overviewMarkers.forEach((marker) => {
-      const startBounds = rowBounds[marker.startIndex];
-      const endBounds = rowBounds[marker.endIndex];
+      const startElement = rowElements[marker.startIndex];
+      const endElement = rowElements[marker.endIndex];
 
-      if (!startBounds || !endBounds) {
+      if (!startElement || !endElement) {
         nextLayout[marker.id] = getFallbackOverviewMarkerLayout(marker);
         return;
       }
 
-      const top = (startBounds.top / contentHeight) * overviewHeight;
-      const rawHeight =
-        ((endBounds.bottom - startBounds.top) / contentHeight) * overviewHeight;
+      const startTop = getScrollableChildTop(codeLinesElement, startElement);
+      const endBottom =
+        getScrollableChildTop(codeLinesElement, endElement) +
+        endElement.offsetHeight;
+      const top = (startTop / contentHeight) * overviewHeight;
+      const rawHeight = ((endBottom - startTop) / contentHeight) * overviewHeight;
       const height = Math.max(rawHeight, MIN_OVERVIEW_MARKER_HEIGHT);
       const clampedTop = Math.min(
         top,
@@ -273,10 +313,14 @@ export function SplitDiffFiles({
       };
     });
 
-    setOverviewMarkerLayout(nextLayout);
+    setOverviewMarkerLayout((currentLayout) =>
+      areOverviewMarkerLayoutsEqual(currentLayout, nextLayout)
+        ? currentLayout
+        : nextLayout,
+    );
   }, [overviewMarkers]);
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     updateOverviewMarkerLayout();
 
     const codeLinesElement = codeLinesRef.current;

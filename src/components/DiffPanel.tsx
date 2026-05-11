@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { startTransition, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ChevronLeft, ChevronRight, Diff } from "lucide-react";
 import type { UiMessages } from "../i18n";
@@ -147,12 +147,16 @@ export function DiffPanel({
     }
 
     const goToPreviousResult = () => {
-      onDirectionChange("previous");
-      onIndexChange(currentIndex === 0 ? count - 1 : currentIndex - 1);
+      startTransition(() => {
+        onDirectionChange("previous");
+        onIndexChange(currentIndex === 0 ? count - 1 : currentIndex - 1);
+      });
     };
     const goToNextResult = () => {
-      onDirectionChange("next");
-      onIndexChange((currentIndex + 1) % count);
+      startTransition(() => {
+        onDirectionChange("next");
+        onIndexChange((currentIndex + 1) % count);
+      });
     };
     const goToResult = (index: number) => {
       if (index === currentIndex) {
@@ -168,8 +172,10 @@ export function DiffPanel({
               ? "next"
               : "previous";
 
-      onDirectionChange(direction);
-      onIndexChange(index);
+      startTransition(() => {
+        onDirectionChange(direction);
+        onIndexChange(index);
+      });
     };
 
     return (
@@ -261,6 +267,15 @@ export function DiffPanel({
     systemPromptDiffBlocks.find((block) => block.key === activeSystemPromptKey) ??
     systemPromptDiffBlocks[0] ??
     null;
+  const selectSystemPromptTab = (key: string) => {
+    if (key === activeSystemPromptBlock?.key) {
+      return;
+    }
+
+    startTransition(() => {
+      setActiveSystemPromptKey(key);
+    });
+  };
   const systemPromptTabs =
     systemPromptDiffBlocks.length > 1 ? (
       <div className="prompt-diff-tabs" aria-label={ui.systemPrompt}>
@@ -272,7 +287,7 @@ export function DiffPanel({
               type="button"
               className={block.key === activeSystemPromptBlock?.key ? "active" : ""}
               key={block.key}
-              onClick={() => setActiveSystemPromptKey(block.key)}
+              onClick={() => selectSystemPromptTab(block.key)}
             >
               <span>{block.label}</span>
               {changedRowCount > 0 ? <b>{changedRowCount}</b> : null}
@@ -295,7 +310,9 @@ export function DiffPanel({
               type="button"
               className={compareDirection === "previous" ? "active" : ""}
               disabled={!canComparePrevious}
-              onClick={() => onCompareDirectionChange("previous")}
+              onClick={() =>
+                startTransition(() => onCompareDirectionChange("previous"))
+              }
             >
               {ui.comparePrevious}
             </button>
@@ -303,7 +320,9 @@ export function DiffPanel({
               type="button"
               className={compareDirection === "next" ? "active" : ""}
               disabled={!canCompareNext}
-              onClick={() => onCompareDirectionChange("next")}
+              onClick={() =>
+                startTransition(() => onCompareDirectionChange("next"))
+              }
             >
               {ui.compareNext}
             </button>
@@ -318,7 +337,7 @@ export function DiffPanel({
               <button
                 type="button"
                 disabled={!canNavigatePreviousVersion}
-                onClick={onNavigatePreviousVersion}
+                onClick={() => startTransition(onNavigatePreviousVersion)}
                 aria-label={ui.previousVersionAria}
                 title={ui.previousVersionAria}
               >
@@ -327,7 +346,7 @@ export function DiffPanel({
               <button
                 type="button"
                 disabled={!canNavigateNextVersion}
-                onClick={onNavigateNextVersion}
+                onClick={() => startTransition(onNavigateNextVersion)}
                 aria-label={ui.nextVersionAria}
                 title={ui.nextVersionAria}
               >
