@@ -73,7 +73,7 @@ import {
   repriceCostSnapshotForResultCount,
   resolveTopicModelIds,
 } from "./lib/costEstimator";
-import { diffLines } from "./lib/diff";
+import { diffLines, type LineDiffRow } from "./lib/diff";
 import { useUsdKrwExchangeRate } from "./lib/exchangeRate";
 import {
   countImageResultMedia,
@@ -862,6 +862,8 @@ export function App() {
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [sidebarView, setSidebarView] = useState<SidebarView>("explorer");
   const [mainView, setMainView] = useState<"write" | "diff" | "cost">("write");
+  const [diffPanelReady, setDiffPanelReady] = useState(false);
+  const diffPanelReadyFrameRef = useRef<number | null>(null);
   const [compareDirection, setCompareDirection] =
     useState<CompareDirection>("previous");
   const [baseResultDiffIndex, setBaseResultDiffIndex] = useState(0);
@@ -901,6 +903,43 @@ export function App() {
   const [customModelMemo, setCustomModelMemo] = useState("");
   const [customModelPrice, setCustomModelPrice] = useState(
     getDefaultCustomModelPrice("text"),
+  );
+
+  const cancelDiffPanelReadyFrame = useCallback(() => {
+    if (diffPanelReadyFrameRef.current !== null) {
+      window.cancelAnimationFrame(diffPanelReadyFrameRef.current);
+      diffPanelReadyFrameRef.current = null;
+    }
+  }, []);
+
+  const scheduleDiffPanelReady = useCallback(() => {
+    cancelDiffPanelReadyFrame();
+    diffPanelReadyFrameRef.current = window.requestAnimationFrame(() => {
+      diffPanelReadyFrameRef.current = window.requestAnimationFrame(() => {
+        diffPanelReadyFrameRef.current = null;
+        startTransition(() => setDiffPanelReady(true));
+      });
+    });
+  }, [cancelDiffPanelReadyFrame]);
+
+  const prepareDiffPanelRender = useCallback(() => {
+    setDiffPanelReady(false);
+    scheduleDiffPanelReady();
+  }, [scheduleDiffPanelReady]);
+
+  const openMainView = useCallback(
+    (view: "write" | "diff" | "cost") => {
+      if (view === "diff") {
+        setMainView("diff");
+        prepareDiffPanelRender();
+        return;
+      }
+
+      cancelDiffPanelReadyFrame();
+      setDiffPanelReady(false);
+      setMainView(view);
+    },
+    [cancelDiffPanelReadyFrame, prepareDiffPanelRender],
   );
   const [editingModelKey, setEditingModelKey] = useState<string | null>(null);
   const [
@@ -1008,6 +1047,30 @@ export function App() {
       String(inputRate?.inputTokenUnitInTenThousands ?? 100),
     );
   };
+
+  useEffect(
+    () => () => {
+      cancelDiffPanelReadyFrame();
+    },
+    [cancelDiffPanelReadyFrame],
+  );
+
+  useEffect(() => {
+    if (mainView !== "diff") {
+      cancelDiffPanelReadyFrame();
+      setDiffPanelReady(false);
+      return;
+    }
+
+    if (!diffPanelReady) {
+      scheduleDiffPanelReady();
+    }
+  }, [
+    cancelDiffPanelReadyFrame,
+    diffPanelReady,
+    mainView,
+    scheduleDiffPanelReady,
+  ]);
 
   useEffect(() => {
     const parsedPrice = Number(customModelPrice);
@@ -1655,7 +1718,7 @@ export function App() {
       setDraftImages([]);
       setEditingVersionId(null);
       setActiveVersionId("draft");
-      setMainView("write");
+      openMainView("write");
       clearDraftHistory();
       return;
     }
@@ -1663,9 +1726,9 @@ export function App() {
     applyDraftState(selectedTopicDraft ?? createDefaultDraftState());
     setEditingVersionId(null);
     setActiveVersionId("draft");
-    setMainView("write");
+    openMainView("write");
     clearDraftHistory();
-  }, [loading, selectedTopicId]);
+  }, [loading, openMainView, selectedTopicId]);
 
   const selectedStoredVersion =
     activeVersionId === "draft"
@@ -1750,7 +1813,7 @@ export function App() {
     setEditingVersionId(null);
     setActiveVersionId(versionId);
     setCompareDirection("previous");
-    setMainView("diff");
+    openMainView("diff");
   };
   const effectiveCompareDirection: CompareDirection =
     selectedStoredVersion && compareDirection === "next"
@@ -1775,26 +1838,38 @@ export function App() {
   const compareTargetKind = compareTargetVersion
     ? getVersionKind(compareTargetVersion)
     : selectedTopicKind;
-  const compareBaseSystemPrompts = compareBase
-    ? getVersionSystemPrompts(compareBase)
-    : [];
-  const compareBaseUserPrompt = compareBase
-    ? getVersionUserPrompt(compareBase)
-    : "";
-  const compareTargetSystemPrompts = compareTargetVersion
-    ? getVersionSystemPrompts(compareTargetVersion)
-    : draftSystemPrompts;
+  const compareBaseSystemPrompts = useMemo(
+    () => (compareBase ? getVersionSystemPrompts(compareBase) : []),
+    [compareBase],
+  );
+  const compareBaseUserPrompt = useMemo(
+    () => (compareBase ? getVersionUserPrompt(compareBase) : ""),
+    [compareBase],
+  );
+  const compareTargetSystemPrompts = useMemo(
+    () =>
+      compareTargetVersion
+        ? getVersionSystemPrompts(compareTargetVersion)
+        : draftSystemPrompts,
+    [compareTargetVersion, draftSystemPrompts],
+  );
   const compareTargetUserPrompt = compareTargetVersion
     ? getVersionUserPrompt(compareTargetVersion)
     : draftUserPrompt;
-  const compareBaseResultTexts =
-    compareTargetKind === "text" ? getVersionResultTexts(compareBase) : [];
-  const compareTargetResultTexts =
-    compareTargetKind === "text"
-      ? compareTargetVersion
-        ? getVersionResultTexts(compareTargetVersion)
-        : normalizedDraftResultTexts
-      : [];
+  const compareBaseResultTexts = useMemo(
+    () =>
+      compareTargetKind === "text" ? getVersionResultTexts(compareBase) : [],
+    [compareBase, compareTargetKind],
+  );
+  const compareTargetResultTexts = useMemo(
+    () =>
+      compareTargetKind === "text"
+        ? compareTargetVersion
+          ? getVersionResultTexts(compareTargetVersion)
+          : normalizedDraftResultTexts
+        : [],
+    [compareTargetKind, compareTargetVersion, normalizedDraftResultTexts],
+  );
   const compareTargetLabel = compareTargetVersion?.label ?? ui.draftMessage;
   const compareBaseImages = compareBase
     ? (imagesByVersion[compareBase.id] ?? [])
@@ -1857,16 +1932,24 @@ export function App() {
     setBaseResultDiffIndex(0);
     setTargetResultDiffIndex(0);
   }, [activeVersionId, compareDirection, compareTargetKind]);
-  const systemPromptDiffRows = systemPromptDiffBlocks.flatMap(
-    (block) => block.rows,
-  );
-  const promptDiffRows = [...systemPromptDiffRows, ...userPromptDiffRows];
-  const addedCount = promptDiffRows.filter(
-    (row) => row.type === "added" || row.type === "changed",
-  ).length;
-  const removedCount = promptDiffRows.filter(
-    (row) => row.type === "removed" || row.type === "changed",
-  ).length;
+  const { addedCount, removedCount } = useMemo(() => {
+    let added = 0;
+    let removed = 0;
+    const countRow = (row: LineDiffRow) => {
+      if (row.type === "added" || row.type === "changed") {
+        added += 1;
+      }
+
+      if (row.type === "removed" || row.type === "changed") {
+        removed += 1;
+      }
+    };
+
+    systemPromptDiffBlocks.forEach((block) => block.rows.forEach(countRow));
+    userPromptDiffRows.forEach(countRow);
+
+    return { addedCount: added, removedCount: removed };
+  }, [systemPromptDiffBlocks, userPromptDiffRows]);
   const latestComparableResultText =
     selectedTopicKind === "text" ? getVersionResultText(latestVersion) : "";
   const draftComparableResultText =
@@ -2283,7 +2366,7 @@ export function App() {
     setEditingVersionId(null);
     setActiveVersionId("draft");
     setCompareDirection("previous");
-    setMainView("write");
+    openMainView("write");
   };
 
   const refresh = async () => {
@@ -3598,7 +3681,7 @@ export function App() {
     setCompareDirection("previous");
     setBaseResultDiffIndex(0);
     setTargetResultDiffIndex(0);
-    setMainView("diff");
+    openMainView("diff");
     showToast(ui.versionSaved);
   };
 
@@ -3701,7 +3784,7 @@ export function App() {
     clearDraftHistory();
     setEditingVersionId(null);
     setActiveVersionId(editingVersion.id);
-    setMainView("write");
+    openMainView("write");
     showToast(ui.versionUpdated);
   };
 
@@ -3785,7 +3868,7 @@ export function App() {
     setEditingVersionId(null);
     setActiveVersionId(version.id);
     setCompareDirection("previous");
-    setMainView("diff");
+    openMainView("diff");
   };
 
   const cherryPickVersion = (version: PromptVersion) => {
@@ -3801,7 +3884,7 @@ export function App() {
       void updateSelectedTopicModels(version.modelIds);
     }
     setActiveVersionId("draft");
-    setMainView("write");
+    openMainView("write");
     showToast(ui.cherryPickApplied(version.label));
   };
 
@@ -3820,7 +3903,7 @@ export function App() {
     );
     clearDraftHistory();
     setActiveVersionId(version.id);
-    setMainView("write");
+    openMainView("write");
   };
 
   const cancelVersionEdit = () => {
@@ -3828,7 +3911,7 @@ export function App() {
     applyDraftState(selectedTopicDraft ?? createDefaultDraftState());
     clearDraftHistory();
     setActiveVersionId("draft");
-    setMainView("write");
+    openMainView("write");
   };
 
   if (loading) {
@@ -3981,13 +4064,13 @@ export function App() {
           setEditingVersionId(null);
           setActiveVersionId("draft");
           setCompareDirection("previous");
-          setMainView("diff");
+          openMainView("diff");
         }}
         onOpenVersionDiff={(versionId) => {
           setEditingVersionId(null);
           setActiveVersionId(versionId);
           setCompareDirection("previous");
-          setMainView("diff");
+          openMainView("diff");
         }}
         onToggleGoodResult={(version) => void toggleGoodResult(version)}
       />
@@ -5196,7 +5279,7 @@ export function App() {
               <button
                 type="button"
                 className={mainView === "write" ? "active" : ""}
-                onClick={() => setMainView("write")}
+                onClick={() => openMainView("write")}
               >
                 <FileText aria-hidden="true" size={15} />
                 {ui.write}
@@ -5204,7 +5287,7 @@ export function App() {
               <button
                 type="button"
                 className={mainView === "diff" ? "active" : ""}
-                onClick={() => setMainView("diff")}
+                onClick={() => openMainView("diff")}
               >
                 <Diff aria-hidden="true" size={15} />
                 {ui.diff}
@@ -5216,7 +5299,7 @@ export function App() {
               <button
                 type="button"
                 className={mainView === "cost" ? "active" : ""}
-                onClick={() => setMainView("cost")}
+                onClick={() => openMainView("cost")}
               >
                 <ChartNoAxesColumnIncreasing aria-hidden="true" size={15} />
                 {ui.costTab}
@@ -5289,6 +5372,7 @@ export function App() {
                   onResetDraftSystemPrompts={resetDraftSystemPrompts}
                 />
               ) : mainView === "diff" ? (
+                diffPanelReady ? (
                 <DiffPanel
                   addedCount={addedCount}
                   canCompareNext={canCompareStoredNext}
@@ -5316,7 +5400,10 @@ export function App() {
                   ui={ui}
                   userPromptDiffRows={userPromptDiffRows}
                   onBaseResultDiffIndexChange={setBaseResultDiffIndex}
-                  onCompareDirectionChange={setCompareDirection}
+                  onCompareDirectionChange={(direction) => {
+                    prepareDiffPanelRender();
+                    setCompareDirection(direction);
+                  }}
                   onNavigateNextVersion={() =>
                     navigateDiffVersion(nextNavigableVersionId)
                   }
@@ -5326,6 +5413,25 @@ export function App() {
                   onTargetResultDiffIndexChange={setTargetResultDiffIndex}
                   onToggleGoodResult={(version) => void toggleGoodResult(version)}
                 />
+                ) : (
+                  <section className="panel diff-panel diff-panel-pending">
+                    <div className="diff-titlebar">
+                      <div className="editor-tab active">
+                        <Diff aria-hidden="true" size={15} />
+                        {"prompt.diff"}
+                      </div>
+                      <div className="diff-summary">
+                        <span className="added">+{addedCount}</span>
+                        <span className="removed">-{removedCount}</span>
+                      </div>
+                    </div>
+                    <div className="diff-panel-pending-body" aria-hidden="true">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+                  </section>
+                )
               ) : (
                 <CostTrendPanel
                   activeCostLabel={activeCostLabel}
